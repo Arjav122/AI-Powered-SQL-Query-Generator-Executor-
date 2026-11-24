@@ -50,9 +50,13 @@ def demo_config() -> dict:
 
 
 def connection_key(cfg: dict) -> str:
-    """Short id for a connection (host + port + database). Used to name its Chroma collections."""
+    """Short id for a connection (host + port + database). Used to name its Chroma collections.
+
+    Keys for user connections start with "mem", which tells rag.py to keep them in memory only.
+    """
     raw = f"{cfg['host'].lower()}:{cfg['port']}/{cfg['database']}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+    prefix = "mem" if cfg.get("memory_only") else ""
+    return prefix + hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 def is_private_host(host: str) -> bool:

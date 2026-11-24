@@ -111,8 +111,9 @@ with st.sidebar:
             use_ssl = st.checkbox("Use SSL", value=True)
             submitted = st.form_submit_button("Connect")
         if submitted:
+            # memory_only: this connection's schema/vectors stay in RAM and are never written to disk.
             new_cfg = {"host": host.strip(), "port": int(port), "user": user.strip(),
-                       "password": password, "database": database.strip(), "ssl": use_ssl}
+                       "password": password, "database": database.strip(), "ssl": use_ssl, "memory_only": True}
             if not new_cfg["host"] or not new_cfg["user"]:
                 st.error("Host and user are required.")
             elif db.is_private_host(new_cfg["host"]):
@@ -121,6 +122,10 @@ with st.sidebar:
                 try:
                     new_engine = db.get_engine(new_cfg)
                     db.test_connection(new_engine)
+                    if ss.own_cfg and db.connection_key(ss.own_cfg) != db.connection_key(new_cfg):
+                        old_key = db.connection_key(ss.own_cfg)
+                        rag.forget(old_key)  # drop the previous connection's data from memory
+                        ss.indexed.pop(old_key, None)
                     ss.own_cfg = new_cfg
                     try:
                         ss.own_write_privileges = db.write_privileges(new_engine)

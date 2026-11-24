@@ -12,14 +12,21 @@ import db
 CHROMA_PATH = "./chroma_data"
 EMBEDDING_MODEL = "text-embedding-3-small"
 FEW_SHOT_FILE = Path(__file__).with_name("few_shot.json")
-_client = None
+_disk_client = None
+_memory_client = None
 
 
-def _chroma():
-    global _client
-    if _client is None:
-        _client = chromadb.PersistentClient(path=CHROMA_PATH, settings=Settings(anonymized_telemetry=False))
-    return _client
+def _chroma(conn_key: str = ""):
+    """Demo database -> saved on disk. User connections ("mem..." keys) -> RAM only, never written to disk."""
+    global _disk_client, _memory_client
+    settings = Settings(anonymized_telemetry=False)
+    if conn_key.startswith("mem"):
+        if _memory_client is None:
+            _memory_client = chromadb.EphemeralClient(settings=settings)
+        return _memory_client
+    if _disk_client is None:
+        _disk_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=settings)
+    return _disk_client
 
 
 def embed(texts: list[str]) -> list[list[float]]:
@@ -32,11 +39,11 @@ def embed(texts: list[str]) -> list[list[float]]:
 
 
 def _schema_collection(conn_key: str):
-    return _chroma().get_or_create_collection(f"schema_{conn_key}", embedding_function=None)
+    return _chroma(conn_key).get_or_create_collection(f"schema_{conn_key}", embedding_function=None)
 
 
 def _examples_collection(conn_key: str):
-    return _chroma().get_or_create_collection(f"fewshot_{conn_key}", embedding_function=None)
+    return _chroma(conn_key).get_or_create_collection(f"fewshot_{conn_key}", embedding_function=None)
 
 
 # ---------- Schema index ----------
@@ -69,8 +76,8 @@ def ensure_index(engine, cfg: dict, force: bool = False) -> dict:
 
     db.add_sample_values(engine, schema)
     documents = [table_document(t) for t in schema]
-    _chroma().delete_collection(f"schema_{conn_key}")
-    collection = _chroma().create_collection(
+    _chroma(conn_key).delete_collection(f"schema_{conn_key}")
+    collection = _chroma(conn_key).create_collection(
         f"schema_{conn_key}", embedding_function=None, metadata={"schema_hash": new_hash})
     collection.add(
         ids=[t["name"] for t in schema],
@@ -136,10 +143,19 @@ def seed_examples(conn_key: str) -> int:
 def reset_examples(conn_key: str) -> int:
     """Delete the examples collection and re-seed it from few_shot.json (used by eval.py)."""
     try:
-        _chroma().delete_collection(f"fewshot_{conn_key}")
+        _chroma(conn_key).delete_collection(f"fewshot_{conn_key}")
     except Exception:
         pass  # didn't exist yet
     return seed_examples(conn_key)
+
+
+def forget(conn_key: str) -> None:
+    """Remove everything stored for a connection (used when a user switches or disconnects)."""
+    for name in (f"schema_{conn_key}", f"fewshot_{conn_key}"):
+        try:
+            _chroma(conn_key).delete_collection(name)
+        except Exception:
+            pass  # nothing stored yet
 
 
 def add_example(conn_key: str, question: str, sql: str) -> None:
