@@ -161,6 +161,8 @@ Full per-question output is saved to `eval_results.json` (git-ignored; re-run to
 - *Connect my own* blocks hosts that resolve to loopback/private/link-local addresses (127.x, 10.x, 172.16–31.x, 192.168.x,
   169.254.x), so the hosted app can't be used to probe internal networks. Credentials live only in `st.session_state`
   and are never logged or saved.
+- After connecting, the app reads the user's own permissions (`SHOW GRANTS`) and shows a ⚠️ warning if the user can
+  change data (INSERT, UPDATE, DELETE, DROP, ALL, …), recommending a read-only user instead.
 - Table/column names and a few sample values are sent to OpenAI to generate SQL (shown in the UI).
 - `.env` and `.streamlit/secrets.toml` are git-ignored. Never commit real keys or passwords.
 

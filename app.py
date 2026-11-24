@@ -96,6 +96,12 @@ with st.sidebar:
     if mode == "Demo database":
         cfg = db.demo_config()
     else:
+        st.info("🔒 Use a **read-only** MySQL user, not your admin account. The app only runs read-only "
+                "queries, but a read-only user means your database itself refuses any change.")
+        with st.expander("How to create a read-only user"):
+            st.code("CREATE USER 'ai_reader'@'%' IDENTIFIED BY 'strong-password';\n"
+                    "GRANT SELECT, SHOW VIEW ON your_database.* TO 'ai_reader'@'%';", language="sql")
+            st.caption("Delete it any time with: DROP USER 'ai_reader'@'%';")
         with st.form("own_db"):
             host = st.text_input("Host", placeholder="gateway01.xx.prod.aws.tidbcloud.com")
             port = st.number_input("Port", value=4000, min_value=1, max_value=65535)
@@ -113,14 +119,29 @@ with st.sidebar:
                 st.error("Local/private addresses (localhost, 127.x, 10.x, 172.16-31.x, 192.168.x) are not allowed here.")
             else:
                 try:
-                    db.test_connection(db.get_engine(new_cfg))
+                    new_engine = db.get_engine(new_cfg)
+                    db.test_connection(new_engine)
                     ss.own_cfg = new_cfg
+                    try:
+                        ss.own_write_privileges = db.write_privileges(new_engine)
+                    except Exception:
+                        ss.own_write_privileges = None  # couldn't check (unusual setup)
                 except Exception as exc:
                     ss.own_cfg = None
                     st.error(f"Connection failed: {exc}")
         cfg = ss.own_cfg
         if cfg is None:
             st.info("Fill in the form and click Connect.")
+        else:
+            privileges = ss.get("own_write_privileges")
+            if privileges:
+                st.warning("⚠️ This user can change data (" + ", ".join(privileges[:6])
+                           + (", ..." if len(privileges) > 6 else "") + "). The app still blocks every "
+                           "write query, but a read-only user is safer.")
+            elif privileges is None:
+                st.caption("Could not check this user's permissions.")
+            else:
+                st.caption("✅ Read-only user: the database itself will refuse any change.")
 
     if cfg is not None:
         engine = db.get_engine(cfg)

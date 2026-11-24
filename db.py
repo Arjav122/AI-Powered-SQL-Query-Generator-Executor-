@@ -101,6 +101,31 @@ def test_connection(engine) -> None:
         conn.execute(text("SELECT 1"))
 
 
+WRITE_PRIVILEGES = {
+    "ALL", "ALL PRIVILEGES", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX",
+    "TRIGGER", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EVENT", "FILE", "SUPER",
+    "CREATE USER", "GRANT OPTION", "SHUTDOWN", "RELOAD",
+}
+
+
+def write_privileges(engine) -> list[str]:
+    """Privileges the connected user has that could change data (empty list = read-only user).
+
+    Uses SHOW GRANTS, which only reads the user's own permissions.
+    """
+    found = set()
+    with engine.connect() as conn:
+        grants = [row[0] for row in conn.execute(text("SHOW GRANTS FOR CURRENT_USER()"))]
+    for grant in grants:
+        match = re.match(r"GRANT (.+?) ON ", grant)
+        if match:  # e.g. "GRANT SELECT, INSERT ON `shop`.* TO ..."
+            privileges = {p.strip().upper() for p in match.group(1).split(",")}
+            found |= privileges & WRITE_PRIVILEGES
+        if "WITH GRANT OPTION" in grant.upper():
+            found.add("GRANT OPTION")
+    return sorted(found)
+
+
 # ---------- Schema browsing ----------
 
 def _check_identifier(value: str, kind: str) -> str:
