@@ -1,8 +1,9 @@
+streamlit
 fastapi
 uvicorn
-streamlit
-requests
 sqlalchemy
-mysql-connector-python
-python-dotenv
+pymysql
+cryptography  # needed by pymysql for MySQL 8 default login (caching_sha2_password)
+certifi       # CA certificates for SSL connections (TiDB Cloud)
 openai
+python-dotenv

@@ -1,72 +1,89 @@
-import logging
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+"""Streamlit UI. Calls db.py / llm.py directly (no separate backend needed)."""
+import streamlit as st
 
-from database import list_databases, list_tables, list_columns
-from query_generator import generate_sql_query, execute_query
+import db
+import llm
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+st.set_page_config(page_title="AI SQL Assistant", page_icon="🧠", layout="wide")
+st.title("🧠 AI SQL Assistant")
+st.caption("Generate and run read-only SQL queries from natural language.")
 
-app = FastAPI(title="AI SQL Query API", version="1.1.0")
+st.session_state.setdefault("generated_sql", "")
+st.session_state.setdefault("databases", [])
 
+try:
+    engine = db.get_engine()
+except Exception as exc:
+    st.error(f"Could not set up the database connection: {exc}")
+    st.stop()
 
-class GenerateSQLRequest(BaseModel):
-    natural_language_query: str = Field(..., min_length=3)
-    database_name: str | None = None
-    table_names: list[str] | None = None
+# ---------- Sidebar: 3-level schema browser ----------
+st.sidebar.header("Schema Explorer")
+if st.sidebar.button("Refresh Databases"):
+    try:
+        st.session_state.databases = db.list_databases(engine)
+    except Exception as exc:
+        st.sidebar.error(f"Unable to fetch databases: {exc}")
 
+selected_db = st.sidebar.selectbox("Database", [""] + st.session_state.databases)
+tables = []
+if selected_db:
+    try:
+        tables = db.list_tables(engine, selected_db)
+    except Exception as exc:
+        st.sidebar.error(f"Unable to fetch tables: {exc}")
 
-class ExecuteSQLRequest(BaseModel):
-    sql_query: str = Field(..., min_length=1)
+selected_tables = st.sidebar.multiselect("Tables (for JOIN/UNION)", tables)
+for table_name in selected_tables[:3]:
+    try:
+        st.sidebar.write(f"Columns: {table_name}")
+        st.sidebar.write(db.list_columns(engine, selected_db, table_name))
+    except Exception as exc:
+        st.sidebar.error(f"Unable to fetch columns for {table_name}: {exc}")
 
+if tables:
+    st.sidebar.write("Suggested tables")
+    st.sidebar.write(tables[:3])
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+# ---------- Main: generate + run ----------
+col1, col2 = st.columns(2)
 
-
-@app.get("/list_databases/")
-def get_databases():
-    result = list_databases()
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    return result
-
-
-@app.get("/list_tables/{database_name}")
-def get_tables(database_name: str):
-    result = list_tables(database_name)
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
-
-
-@app.get("/list_columns/{database_name}/{table_name}")
-def get_columns(database_name: str, table_name: str):
-    result = list_columns(database_name, table_name)
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
-
-
-@app.post("/generate_sql/")
-def generate_sql(request: GenerateSQLRequest):
-    logger.debug("Generating SQL for NL query")
-    sql_query = generate_sql_query(
-        nl_query=request.natural_language_query,
-        database_name=request.database_name,
-        table_names=request.table_names,
+with col1:
+    st.subheader("Generate SQL")
+    if not selected_db:
+        st.info("Select a database from sidebar first for better SQL quality.")
+    elif not selected_tables:
+        st.info("Select one or more tables from sidebar for accurate JOIN/UNION queries.")
+    question = st.text_area(
+        "Ask in plain English",
+        placeholder="Example: Show top 10 customers by total order value.",
+        height=180,
     )
+    if st.button("Generate SQL", type="primary"):
+        if len(question.strip()) < 3:
+            st.warning("Please type a question first.")
+        else:
+            try:
+                with st.spinner("Generating SQL..."):
+                    st.session_state.generated_sql = llm.generate_sql(
+                        engine, question, selected_db or None, selected_tables or None
+                    )
+            except Exception as exc:
+                st.error(f"Error generating SQL: {exc}")
+                st.session_state.generated_sql = ""
 
-    if sql_query and not sql_query.lower().startswith("error generating sql query:"):
-        return {"sql_query": sql_query}
-    raise HTTPException(status_code=400, detail=sql_query or "Failed to generate SQL")
+    if st.session_state.generated_sql:
+        st.code(st.session_state.generated_sql, language="sql")
 
-
-@app.post("/execute_sql/")
-def execute_sql(request: ExecuteSQLRequest):
-    result = execute_query(request.sql_query)
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+with col2:
+    st.subheader("Execute SQL")
+    sql_to_run = st.text_area("Read-only SQL only", value=st.session_state.generated_sql, height=180)
+    if st.button("Run Query"):
+        try:
+            rows = db.run_query(engine, sql_to_run)
+            if rows:
+                st.dataframe(rows, width="stretch")
+            else:
+                st.info("Query ran successfully but returned no rows.")
+        except Exception as exc:
+            st.error(f"Error executing query: {exc}")
