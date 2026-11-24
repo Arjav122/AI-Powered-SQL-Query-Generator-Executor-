@@ -7,7 +7,8 @@ The app finds the relevant tables with **RAG** (ChromaDB + OpenAI embeddings), w
 chat model, checks it against the real database with `EXPLAIN` (and fixes it if it fails), and blocks anything that
 could change data.
 
-**96.7% execution accuracy** on a 30-question benchmark ([results](#-evaluation-results)).
+**96.7% execution accuracy** on a 30-question benchmark. On a 65-table schema, RAG cut prompt tokens by **79%**
+(9,200 → 1,973) and was more accurate than sending the full schema (96.7% vs 93.3%) ([results](#-evaluation-results)).
 
 **Tech:** Python 3.11 · Streamlit · FastAPI · SQLAlchemy + PyMySQL · MySQL / TiDB Cloud · OpenAI (`gpt-4o-mini`,
 `text-embedding-3-small`) · ChromaDB · sqlglot · pandas
@@ -173,28 +174,35 @@ python eval.py --limit 5  # quick check
 used by the Spider benchmark. Both queries go through the same safety layer. The few-shot examples come from a clean
 copy of `few_shot.json`, so 👍 clicks can't leak test answers into the evaluation.
 
-**Setup:** classicmodels (8 tables), `gpt-4o-mini`, temperature 0, 30 questions, run 2026-11-24.
+Two experiments, same 30 questions (all about classicmodels), `gpt-4o-mini`, temperature 0, run 2026-11-24:
 
-| Metric | Full schema | RAG + few-shot |
-|---|---:|---:|
-| **Execution accuracy** | **96.7%** (29/30) | **96.7%** (29/30) |
-| Easy (8) | 100% | 100% |
-| Joins (8) | 87.5% | 87.5% |
-| Aggregation (7) | 100% | 100% |
-| Dates (7) | 100% | 100% |
-| Avg prompt tokens | 1,904 | 1,814 (−4.7%) |
-| Avg latency | 2.52 s | 2.94 s |
-| Avg tables sent | 8 | 7.1 |
-| Needed tables included in prompt | 100% | 100% |
-| Queries fixed by self-correction | 1 | 0 |
+- **Small schema:** only classicmodels (8 tables), `MYSQL_DATABASE=classicmodels`.
+- **Large schema:** classicmodels plus 57 unrelated tables (a generated 51-table `city_hospital` database, plus
+  `college` and `test`), 65 tables in total, `MYSQL_DATABASE=` (empty). The extra tables act as distractors, like a
+  real company database where most tables are irrelevant to any one question.
+
+| Metric | Small: full schema | Small: RAG | **Large: full schema** | **Large: RAG** |
+|---|---:|---:|---:|---:|
+| **Execution accuracy** | 96.7% | 96.7% | 93.3% | **96.7%** |
+| Easy (8) | 100% | 100% | 100% | 100% |
+| Joins (8) | 87.5% | 87.5% | 87.5% | 87.5% |
+| Aggregation (7) | 100% | 100% | 100% | 100% |
+| Dates (7) | 100% | 100% | 85.7% | **100%** |
+| Avg prompt tokens | 1,904 | 1,814 | 9,200 | **1,973 (−79%)** |
+| Avg latency | 2.52 s | 2.94 s | 2.46 s | 2.96 s |
+| Avg tables sent | 8 | 7.1 | 65 | **8.6** |
+| Needed tables included in prompt | 100% | 100% | 100% | 100% |
+| Queries fixed by self-correction | 1 | 0 | 0 | 0 |
 
 **What the numbers say**
 
-- **The one miss** (both modes): *"For each sales rep, show … the number of customers they manage."* The model listed all 23 employees, including the President with 0 customers, instead of only sales reps.
-- **RAG on a small schema.** classicmodels is small and highly connected, so top-5 + foreign-key neighbours still pulls in about 7 of 8 tables. RAG keeps accuracy the same and saves only about 5% of tokens, while the embedding call adds about 0.4 s. RAG pays off on large schemas, where the full schema would not fit in a prompt.
-- **Self-correction** rescued one query that failed `EXPLAIN` on its first try.
+- **RAG scales.** As the schema grew from 8 to 65 tables, full-schema prompts grew about 5× (1,904 → 9,200 tokens), while RAG prompts stayed almost flat (1,814 → 1,973) because it still sends only about 9 tables. On a large schema that is a **79% token (cost) saving**, with the needed tables retrieved 100% of the time.
+- **Fewer distractions, better accuracy.** With 65 tables, full-schema mode answered *"total payment amount received in each year"* from `city_hospital.invoices` instead of `classicmodels.payments`. RAG never saw the hospital tables and got it right.
+- **The one miss in every run:** *"For each sales rep, show … the number of customers they manage."* The model listed all 23 employees (including the President with 0 customers) instead of only sales reps.
+- **Latency.** RAG adds about 0.5 s for the embedding call. On larger schemas the smaller prompt offsets this, and the token saving matters more for cost.
+- **Small schemas.** With only 8 highly connected tables, RAG matches full-schema accuracy and saves just 5%, because top-5 + foreign-key neighbours already covers most tables.
 
-Per-question details (generated SQL, errors, tokens, latency) are in [`eval_results.json`](eval_results.json).
+Per-question details for the latest (65-table) run are in [`eval_results.json`](eval_results.json).
 
 ## 🔒 Security
 
@@ -231,7 +239,7 @@ Put this user in `MYSQL_USER` / `MYSQL_PASSWORD`. Even if a bad query slipped pa
 
 - Only MySQL-compatible databases (MySQL, TiDB, MariaDB).
 - Ambiguous questions are answered with a best guess instead of a clarifying question (this caused the one benchmark miss).
-- The benchmark is small (30 questions on 8 tables), so RAG's token savings are modest here.
+- The benchmark is small (30 questions). The large-schema test uses generated distractor tables, not a real production schema.
 - On Streamlit Cloud, 👍 examples are lost when the app restarts. User connections stay in server memory until the user switches database or the app restarts.
 
 ## 🔮 Future work
