@@ -13,6 +13,7 @@ import safety
 load_dotenv()
 
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
+QUERY_TIMEOUT_SECONDS = 10
 
 
 def get_setting(name: str, default: str = "") -> str:
@@ -49,7 +50,8 @@ def _cached_engine(host, port, user, password, database, ssl):
         port=port,
         database=database or None,
     )
-    connect_args = {"connect_timeout": 10}
+    # read_timeout is a backstop; the main limit is max_execution_time in run_query().
+    connect_args = {"connect_timeout": 10, "read_timeout": QUERY_TIMEOUT_SECONDS + 20}
     if ssl:  # cloud MySQL such as TiDB Cloud requires TLS
         connect_args["ssl"] = {"ca": certifi.where()}
     return create_engine(url, pool_pre_ping=True, pool_recycle=280, connect_args=connect_args)
@@ -88,15 +90,18 @@ def list_columns(engine, database: str, table: str) -> list[str]:
 
 
 def explain(engine, sql: str) -> None:
-    """Run EXPLAIN to check SQL against the real schema. Raises on error."""
+    """Run EXPLAIN on validated SQL to check it against the real schema. Raises on error."""
+    sql = safety.validate(sql)
     with engine.connect() as conn:
         conn.execute(text(f"EXPLAIN {sql}"))
 
 
 def run_query(engine, sql: str) -> list[dict]:
-    """Run a read-only query and return rows as a list of dicts."""
-    safety.check_read_only(sql)
+    """Validate, then run a read-only query with a timeout. Returns rows as a list of dicts."""
+    sql = safety.validate(sql)
     with engine.connect() as conn:
+        # MySQL/TiDB stop any SELECT that runs longer than this (value in milliseconds).
+        conn.execute(text(f"SET SESSION max_execution_time = {QUERY_TIMEOUT_SECONDS * 1000}"))
         result = conn.execute(text(sql))
         columns = list(result.keys())
         return [dict(zip(columns, row)) for row in result.fetchall()]

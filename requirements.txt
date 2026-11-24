@@ -6,4 +6,5 @@ pymysql
 cryptography  # needed by pymysql for MySQL 8 default login (caching_sha2_password)
 certifi       # CA certificates for SSL connections (TiDB Cloud)
 openai
+sqlglot       # parses SQL into a tree for read-only validation
 python-dotenv

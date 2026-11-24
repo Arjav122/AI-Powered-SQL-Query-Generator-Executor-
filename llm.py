@@ -1,5 +1,5 @@
-"""OpenAI prompts that turn English questions into MySQL queries."""
-import re
+"""OpenAI prompts: generate SQL, fix SQL, explain SQL."""
+import json
 
 from openai import OpenAI
 
@@ -8,6 +8,20 @@ import safety
 
 MAX_TABLES = 5
 MAX_COLUMNS_PER_TABLE = 5
+MAX_ATTEMPTS = 3
+SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
+
+SYSTEM_PROMPT = """You are an expert MySQL assistant that writes ONE read-only query.
+Rules:
+- Use ONLY tables and columns from the schema. Never invent names.
+- Use fully qualified table names (database.table).
+- Only SELECT, WITH...SELECT, SHOW, DESCRIBE or EXPLAIN. Never modify data.
+- If the request needs INSERT/UPDATE/DELETE/DDL, return "sql": "" and say why in "explanation".
+- Prefer JOINs over subqueries; join on matching key columns. Use GROUP BY for aggregations.
+- UNION branches must return the same number of compatible columns.
+- Use SELECT * only when the user asks for all details.
+Reply with JSON only:
+{"sql": "<one MySQL query>", "explanation": "<1-2 plain English sentences>", "tables_used": ["db.table", ...]}"""
 
 
 def get_client() -> OpenAI:
@@ -21,36 +35,10 @@ def get_model() -> str:
     return db.get_setting("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def clean_sql_output(response_text: str) -> str:
-    """Pull the SQL statement out of the model's reply."""
-    fenced = re.findall(r"```sql\s*(.*?)\s*```", response_text, flags=re.DOTALL | re.IGNORECASE)
-    if fenced:
-        candidate = fenced[0].strip()
-        return candidate if candidate.endswith(";") else f"{candidate};"
-
-    clean = response_text.strip()
-    patterns = [
-        r"(SELECT\s+.*?;)",
-        r"(SHOW\s+.*?;)",
-        r"(DESCRIBE\s+.*?;)",
-        r"(EXPLAIN\s+.*?;)",
-        r"(WITH\s+\w+\s+AS\s*\(.*?\)\s*SELECT\s+.*?;)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, clean, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-
-    first_line = clean.splitlines()[0].strip() if clean else ""
-    if re.match(r"^(SELECT|SHOW|DESCRIBE|EXPLAIN)\b", first_line, flags=re.IGNORECASE):
-        return f"{first_line.rstrip(';')};"
-    return clean
-
-
 def build_schema_text(engine, database: str | None = None, tables: list[str] | None = None) -> str:
     """Schema as 'db.table: col1, col2' lines (limited to keep the prompt small)."""
     selected = set(tables or [])
-    databases = [database] if database else db.list_databases(engine)
+    databases = [database] if database else [d for d in db.list_databases(engine) if d not in SYSTEM_DATABASES]
     lines = []
     for database_name in databases:
         db_tables = db.list_tables(engine, database_name)
@@ -64,55 +52,85 @@ def build_schema_text(engine, database: str | None = None, tables: list[str] | N
     return "\n".join(lines)
 
 
-def generate_sql(engine, question: str, database: str | None = None, tables: list[str] | None = None) -> str:
-    """Generate one read-only MySQL query for the question. Raises ValueError on failure."""
-    client = get_client()
-    schema_text = build_schema_text(engine, database, tables)
+def _chat_json(messages: list[dict]) -> tuple[dict, int]:
+    """Call the model in JSON mode. Returns (parsed reply, prompt tokens used)."""
+    response = get_client().chat.completions.create(
+        model=get_model(),
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+    reply = json.loads(response.choices[0].message.content or "{}")
+    sql = str(reply.get("sql") or "").strip()
+    if sql.startswith("```"):  # strip code fences if the model adds them anyway
+        sql = sql.strip("`").removeprefix("sql").strip()
+    reply["sql"] = sql
+    reply["explanation"] = str(reply.get("explanation") or "")
+    reply["tables_used"] = list(reply.get("tables_used") or [])
+    return reply, response.usage.prompt_tokens if response.usage else 0
 
-    hint = ""
-    if database and tables:
-        table_list = ", ".join(f"`{database}`.`{t}`" for t in tables)
-        hint = (
-            f"Use database `{database}` and prioritize these tables: {table_list}. "
-            "Use fully qualified table names. "
-            "If user asks JOIN/UNION, operate only on these selected tables."
-        )
-    elif database:
-        hint = f"Use database `{database}` only and prefer fully qualified table names."
 
-    prompt = f"""
-    You are an SQL expert. Convert the following natural language query into an optimized MySQL query.
-    - Prefer JOINS over subqueries.
-    - Use GROUP BY for aggregations if needed.
-    - Return only one read-only SQL query.
-    - Use ONLY tables and columns present in the schema below.
-    - Do not invent column names.
-    - For JOIN queries, prefer joining on matching key columns (for example: id, student_id, user_id).
-    - For UNION queries, ensure both SELECT branches return the same number of columns with compatible types.
-    - Prefer `SELECT *` only when the user asks for all details.
-    - {hint}
+def _check(engine, sql: str) -> str:
+    """Validate SQL and, for SELECT-type queries, run EXPLAIN. Returns safe SQL or raises."""
+    safe_sql = safety.validate(sql)
+    if safety.needs_explain_check(safe_sql):
+        db.explain(engine, safe_sql)
+    return safe_sql
 
-    Database Schema (Limited View):
-    {schema_text}
 
-    User Query: {question}
+def generate_sql(engine, question: str, database: str | None = None, tables: list[str] | None = None) -> dict:
+    """Generate SQL, then self-correct up to MAX_ATTEMPTS times using EXPLAIN errors.
 
-    SQL Query:
+    Returns {"sql", "explanation", "tables_used", "attempts", "prompt_tokens", "error"}.
+    "error" is None on success. "attempts" lists every try as {"sql", "error"}.
     """
+    schema_text = build_schema_text(engine, database, tables)
+    focus = ""
+    if database and tables:
+        focus = f"\nFocus on database `{database}`, tables: {', '.join(tables)}."
+    elif database:
+        focus = f"\nUse database `{database}` only."
 
-    response = client.chat.completions.create(
+    messages = [
+        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nSchema:\n{schema_text}{focus}"},
+        {"role": "user", "content": question},
+    ]
+    result = {"sql": "", "explanation": "", "tables_used": [], "attempts": [], "prompt_tokens": 0, "error": None}
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        reply, tokens = _chat_json(messages)
+        result["prompt_tokens"] += tokens
+        result.update(sql=reply["sql"], explanation=reply["explanation"], tables_used=reply["tables_used"])
+
+        if not reply["sql"]:  # model refused (e.g. user asked to delete data)
+            result["error"] = reply["explanation"] or "The model did not return SQL."
+            result["attempts"].append({"sql": "", "error": result["error"]})
+            return result
+        try:
+            result["sql"] = _check(engine, reply["sql"])
+            result["attempts"].append({"sql": result["sql"], "error": None})
+            return result
+        except Exception as exc:
+            error = str(exc).splitlines()[0][:500]
+            result["attempts"].append({"sql": reply["sql"], "error": error})
+            # Feed the failed SQL and its error back so the model can fix it.
+            messages += [
+                {"role": "assistant", "content": json.dumps(reply)},
+                {"role": "user", "content": f"That SQL failed with this error:\n{error}\nFix it. Reply with the same JSON format."},
+            ]
+
+    result["error"] = f"Could not produce valid SQL after {MAX_ATTEMPTS} attempts: {result['attempts'][-1]['error']}"
+    return result
+
+
+def explain_sql(sql: str) -> str:
+    """Plain-English explanation of any SQL (used when the user edits the query)."""
+    response = get_client().chat.completions.create(
         model=get_model(),
         messages=[
-            {"role": "system", "content": "You are a SQL optimization expert. Generate only read-only MySQL SQL statements."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "Explain what this MySQL query does in 1-2 simple sentences for a non-technical user."},
+            {"role": "user", "content": sql},
         ],
+        temperature=0,
     )
-    sql = clean_sql_output(response.choices[0].message.content or "")
-
-    safety.check_read_only(sql)
-    if re.match(r"^\s*(SELECT|WITH)\b", sql, flags=re.IGNORECASE):
-        try:
-            db.explain(engine, sql)
-        except Exception as exc:
-            raise ValueError(f"Generated SQL looks invalid for your schema. MySQL error: {exc}") from exc
-    return sql
+    return (response.choices[0].message.content or "").strip()

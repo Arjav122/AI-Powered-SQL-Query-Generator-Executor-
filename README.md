@@ -5,8 +5,9 @@ This project converts natural language to SQL and executes read-only SQL queries
 ## Features
 
 - Explore databases, tables, and columns.
-- Generate SQL from plain English using OpenAI.
-- Execute read-only SQL (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`).
+- Generate SQL from plain English using OpenAI, with a plain-English explanation.
+- Self-correction: generated SQL is checked with `EXPLAIN`; on error the SQL + error go back to the model (max 3 attempts).
+- Execute read-only SQL (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`), validated with sqlglot.
 - View results in a Streamlit dashboard.
 
 ## Files
@@ -16,8 +17,8 @@ This project converts natural language to SQL and executes read-only SQL queries
 | `app.py` | Streamlit UI (calls the functions below directly) |
 | `api.py` | Optional thin FastAPI wrapper over the same functions |
 | `db.py` | Config, MySQL connection (SSL optional), schema reading, query execution |
-| `llm.py` | OpenAI prompt that generates SQL |
-| `safety.py` | Read-only SQL checks |
+| `llm.py` | OpenAI prompts: generate SQL (JSON), fix SQL, explain SQL |
+| `safety.py` | sqlglot read-only validation + auto `LIMIT 100` (`python safety.py` shows examples) |
 
 ## Setup
 
@@ -58,4 +59,20 @@ uvicorn api:app --reload
 
 - `.env` and `.streamlit/secrets.toml` are ignored by git.
 - Never commit real API keys/passwords.
-- Write/DDL SQL statements are blocked for safety.
+- SQL is parsed with sqlglot: exactly one statement, only `SELECT` / `WITH…SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`.
+  Write clauses (`INSERT`, `UPDATE`, `DELETE`, DDL, `SELECT … INTO`, `FOR UPDATE`) and risky functions
+  (`LOAD_FILE`, `SLEEP`, `BENCHMARK`) are rejected with a clear reason.
+- `LIMIT 100` is added to `SELECT` queries that have no limit.
+- Queries time out after 10 seconds (`max_execution_time`).
+
+### Use a read-only MySQL user (recommended)
+
+App-level checks are one layer; the database should be the second. Create a user that can only read:
+
+```sql
+CREATE USER 'sql_assistant_ro'@'%' IDENTIFIED BY 'choose-a-strong-password';
+GRANT SELECT, SHOW VIEW ON college.* TO 'sql_assistant_ro'@'%';
+FLUSH PRIVILEGES;
+```
+
+Then put this user in `MYSQL_USER` / `MYSQL_PASSWORD`. Even if a bad query slipped past the app, MySQL itself would refuse to change data.

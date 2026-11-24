@@ -51,8 +51,10 @@ def get_columns(database_name: str, table_name: str):
 
 @app.post("/generate_sql/")
 def generate_sql(request: GenerateSQLRequest):
-    sql = _call(llm.generate_sql, request.natural_language_query, request.database_name, request.table_names)
-    return {"sql_query": sql}
+    result = _call(llm.generate_sql, request.natural_language_query, request.database_name, request.table_names)
+    if result["error"]:
+        raise HTTPException(status_code=400, detail=result)
+    return {"sql_query": result["sql"], **result}
 
 
 @app.post("/execute_sql/")

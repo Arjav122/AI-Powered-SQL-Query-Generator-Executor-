@@ -3,6 +3,7 @@ import streamlit as st
 
 import db
 import llm
+import safety
 
 st.set_page_config(page_title="AI SQL Assistant", page_icon="🧠", layout="wide")
 st.title("🧠 AI SQL Assistant")
@@ -64,26 +65,53 @@ with col1:
             st.warning("Please type a question first.")
         else:
             try:
-                with st.spinner("Generating SQL..."):
-                    st.session_state.generated_sql = llm.generate_sql(
+                with st.spinner("Generating SQL (with self-correction)..."):
+                    st.session_state.generation = llm.generate_sql(
                         engine, question, selected_db or None, selected_tables or None
                     )
             except Exception as exc:
-                st.error(f"Error generating SQL: {exc}")
-                st.session_state.generated_sql = ""
+                st.session_state.generation = {"error": str(exc), "attempts": [], "sql": ""}
+            st.session_state.generated_sql = st.session_state.generation.get("sql", "")
 
-    if st.session_state.generated_sql:
-        st.code(st.session_state.generated_sql, language="sql")
+    gen = st.session_state.get("generation")
+    if gen:
+        if gen.get("error"):
+            st.error(f"Error generating SQL: {gen['error']}")
+        else:
+            st.code(gen["sql"], language="sql")
+            st.markdown(f"**What this query does:** {gen['explanation']}")
+            if gen.get("tables_used"):
+                st.caption("Tables used: " + ", ".join(gen["tables_used"]))
+        attempts = gen.get("attempts", [])
+        if attempts:
+            with st.expander(f"Attempts ({len(attempts)})", expanded=len(attempts) > 1):
+                for i, attempt in enumerate(attempts, 1):
+                    status = "✅ passed EXPLAIN check" if attempt["error"] is None else f"❌ {attempt['error']}"
+                    st.markdown(f"**Attempt {i}:** {status}")
+                    if attempt["sql"]:
+                        st.code(attempt["sql"], language="sql")
 
 with col2:
     st.subheader("Execute SQL")
-    sql_to_run = st.text_area("Read-only SQL only", value=st.session_state.generated_sql, height=180)
-    if st.button("Run Query"):
+    sql_to_run = st.text_area("Read-only SQL only (you can edit it)", value=st.session_state.generated_sql, height=180)
+    run_col, explain_col = st.columns(2)
+    if explain_col.button("Explain this SQL"):
         try:
-            rows = db.run_query(engine, sql_to_run)
+            with st.spinner("Explaining..."):
+                st.info(llm.explain_sql(sql_to_run))
+        except Exception as exc:
+            st.error(f"Could not explain SQL: {exc}")
+    if run_col.button("Run Query", type="primary"):
+        try:
+            safe_sql = safety.validate(sql_to_run)
+            if safe_sql != sql_to_run.strip().rstrip(";").strip():
+                st.caption(f"Ran as: `{safe_sql}` (LIMIT {safety.DEFAULT_LIMIT} added automatically)")
+            rows = db.run_query(engine, safe_sql)
             if rows:
                 st.dataframe(rows, width="stretch")
             else:
                 st.info("Query ran successfully but returned no rows.")
+        except ValueError as exc:
+            st.error(f"Query blocked: {exc}")
         except Exception as exc:
             st.error(f"Error executing query: {exc}")
