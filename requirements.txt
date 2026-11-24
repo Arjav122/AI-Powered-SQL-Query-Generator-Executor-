@@ -6,5 +6,9 @@ pymysql
 cryptography  # needed by pymysql for MySQL 8 default login (caching_sha2_password)
 certifi       # CA certificates for SSL connections (TiDB Cloud)
 openai
+chromadb      # vector store for schema + few-shot retrieval
 sqlglot       # parses SQL into a tree for read-only validation
+pandas
 python-dotenv
+# Streamlit Cloud's sqlite3 is too old for ChromaDB; app.py swaps in this one. Linux-only wheel, skipped on Windows/macOS.
+pysqlite3-binary; sys_platform == "linux"

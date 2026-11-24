@@ -4,7 +4,13 @@ This project converts natural language to SQL and executes read-only SQL queries
 
 ## Features
 
-- Explore databases, tables, and columns.
+- Explore databases, tables, and columns (Schema tab).
+- Schema-aware RAG: one ChromaDB document per table (columns, types, keys, sample values); only the
+  top-5 relevant tables + foreign-key-linked tables are sent to the LLM. Toggle it off to compare with full-schema mode.
+- Few-shot examples: the 3 most similar question→SQL pairs are added to the prompt; 👍 adds new ones.
+- Connect to the demo database or your own (host/port/user/password/database/SSL). Private/local hosts are blocked
+  for user connections; credentials stay in session memory only.
+- Results table, CSV download, automatic bar/line chart, and a 20-item query history.
 - Generate SQL from plain English using OpenAI, with a plain-English explanation.
 - Self-correction: generated SQL is checked with `EXPLAIN`; on error the SQL + error go back to the model (max 3 attempts).
 - Execute read-only SQL (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`), validated with sqlglot.
@@ -18,6 +24,8 @@ This project converts natural language to SQL and executes read-only SQL queries
 | `api.py` | Optional thin FastAPI wrapper over the same functions |
 | `db.py` | Config, MySQL connection (SSL optional), schema reading, query execution |
 | `llm.py` | OpenAI prompts: generate SQL (JSON), fix SQL, explain SQL |
+| `rag.py` | ChromaDB: index schema (re-index only when the schema hash changes), retrieve tables, few-shot examples |
+| `few_shot.json` | Seed question→SQL examples for the demo database |
 | `safety.py` | sqlglot read-only validation + auto `LIMIT 100` (`python safety.py` shows examples) |
 
 ## Setup

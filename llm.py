@@ -4,12 +4,10 @@ import json
 from openai import OpenAI
 
 import db
+import rag
 import safety
 
-MAX_TABLES = 5
-MAX_COLUMNS_PER_TABLE = 5
 MAX_ATTEMPTS = 3
-SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
 
 SYSTEM_PROMPT = """You are an expert MySQL assistant that writes ONE read-only query.
 Rules:
@@ -35,21 +33,20 @@ def get_model() -> str:
     return db.get_setting("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def build_schema_text(engine, database: str | None = None, tables: list[str] | None = None) -> str:
-    """Schema as 'db.table: col1, col2' lines (limited to keep the prompt small)."""
-    selected = set(tables or [])
-    databases = [database] if database else [d for d in db.list_databases(engine) if d not in SYSTEM_DATABASES]
-    lines = []
-    for database_name in databases:
-        db_tables = db.list_tables(engine, database_name)
-        chosen = [t for t in db_tables if t in selected] if selected else db_tables[:MAX_TABLES]
-        for table in chosen:
-            columns = db.list_columns(engine, database_name, table)
-            # Selected tables get all columns to reduce hallucinated column names.
-            if table not in selected:
-                columns = columns[:MAX_COLUMNS_PER_TABLE]
-            lines.append(f"{database_name}.{table}: {', '.join(columns)}")
-    return "\n".join(lines)
+def build_context(cfg: dict, question: str, use_rag: bool = True, k: int = 5) -> dict:
+    """Pick the schema (and few-shot examples) to put in the prompt.
+
+    RAG on : top-k similar tables + FK-linked tables, and the 3 most similar examples.
+    RAG off: every indexed table, no examples (the baseline we compare against).
+    """
+    conn_key = db.connection_key(cfg)
+    if not use_rag:
+        return {"tables": rag.all_tables(conn_key), "examples": []}
+    question_embedding = rag.embed([question])[0]  # embed once, reuse for both lookups
+    return {
+        "tables": rag.retrieve_tables(conn_key, question_embedding, k),
+        "examples": rag.retrieve_examples(conn_key, question_embedding, 3),
+    }
 
 
 def _chat_json(messages: list[dict]) -> tuple[dict, int]:
@@ -78,24 +75,27 @@ def _check(engine, sql: str) -> str:
     return safe_sql
 
 
-def generate_sql(engine, question: str, database: str | None = None, tables: list[str] | None = None) -> dict:
+def generate_sql(engine, cfg: dict, question: str, use_rag: bool = True, k: int = 5) -> dict:
     """Generate SQL, then self-correct up to MAX_ATTEMPTS times using EXPLAIN errors.
 
-    Returns {"sql", "explanation", "tables_used", "attempts", "prompt_tokens", "error"}.
+    Returns {"sql", "explanation", "tables_used", "retrieved", "examples", "attempts", "prompt_tokens", "error"}.
     "error" is None on success. "attempts" lists every try as {"sql", "error"}.
     """
-    schema_text = build_schema_text(engine, database, tables)
-    focus = ""
-    if database and tables:
-        focus = f"\nFocus on database `{database}`, tables: {', '.join(tables)}."
-    elif database:
-        focus = f"\nUse database `{database}` only."
+    context = build_context(cfg, question, use_rag, k)
+    if not context["tables"]:
+        raise ValueError("The schema is not indexed yet. Click 'Re-index schema' in the sidebar.")
+    schema_text = "\n\n".join(t["document"] for t in context["tables"])
+    examples_text = "\n\n".join(f"Question: {e['question']}\nSQL: {e['sql']}" for e in context["examples"])
 
-    messages = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nSchema:\n{schema_text}{focus}"},
-        {"role": "user", "content": question},
-    ]
-    result = {"sql": "", "explanation": "", "tables_used": [], "attempts": [], "prompt_tokens": 0, "error": None}
+    system = f"{SYSTEM_PROMPT}\n\nSchema:\n{schema_text}"
+    if examples_text:
+        system += f"\n\nExamples of good answers for similar questions:\n{examples_text}"
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
+    result = {
+        "sql": "", "explanation": "", "tables_used": [], "attempts": [], "prompt_tokens": 0, "error": None,
+        "retrieved": [{"name": t["name"], "via": t["via"]} for t in context["tables"]],
+        "examples": context["examples"],
+    }
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         reply, tokens = _chat_json(messages)

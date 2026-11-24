@@ -1,6 +1,10 @@
-"""Config, MySQL connection, schema reading and query execution."""
+"""Config, MySQL connection (SSL optional), schema reading and query execution."""
+import hashlib
+import ipaddress
+import json
 import os
 import re
+import socket
 from functools import lru_cache
 
 import certifi
@@ -14,7 +18,12 @@ load_dotenv()
 
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
 QUERY_TIMEOUT_SECONDS = 10
+SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
+SENSITIVE_COLUMN = re.compile(r"password|passwd|pwd|email|phone|mobile|token|secret|api_?key|(^|_)ssn($|_)", re.IGNORECASE)
+MAX_TABLES_TO_INDEX = 200
 
+
+# ---------- Config ----------
 
 def get_setting(name: str, default: str = "") -> str:
     """Read a setting from Streamlit secrets first, then from .env / environment."""
@@ -39,6 +48,27 @@ def demo_config() -> dict:
         "ssl": get_setting("MYSQL_SSL", "false").lower() in ("1", "true", "yes"),
     }
 
+
+def connection_key(cfg: dict) -> str:
+    """Short id for a connection (host + port + database). Used to name its Chroma collections."""
+    raw = f"{cfg['host'].lower()}:{cfg['port']}/{cfg['database']}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def is_private_host(host: str) -> bool:
+    """True if the host resolves to a loopback/private/link-local address (blocked for user connections)."""
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except socket.gaierror:
+        return False  # can't resolve; the connection test will fail anyway
+    for address in addresses:
+        ip = ipaddress.ip_address(address.split("%")[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+            return True
+    return False
+
+
+# ---------- Connection ----------
 
 @lru_cache(maxsize=8)
 def _cached_engine(host, port, user, password, database, ssl):
@@ -65,6 +95,14 @@ def get_engine(cfg: dict | None = None):
     )
 
 
+def test_connection(engine) -> None:
+    """Run SELECT 1. Raises if the database can't be reached."""
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+
+
+# ---------- Schema browsing ----------
+
 def _check_identifier(value: str, kind: str) -> str:
     if not value or not SAFE_IDENTIFIER.fullmatch(value):
         raise ValueError(f"Invalid {kind} name.")
@@ -76,18 +114,91 @@ def list_databases(engine) -> list[str]:
         return [row[0] for row in conn.execute(text("SHOW DATABASES"))]
 
 
+def user_databases(engine, cfg: dict) -> list[str]:
+    """Databases the assistant works on: the configured one, else all non-system databases."""
+    if cfg.get("database"):
+        return [cfg["database"]]
+    return [d for d in list_databases(engine) if d.lower() not in SYSTEM_DATABASES]
+
+
 def list_tables(engine, database: str) -> list[str]:
     db = _check_identifier(database, "database")
     with engine.connect() as conn:
         return [row[0] for row in conn.execute(text(f"SHOW TABLES FROM `{db}`"))]
 
 
-def list_columns(engine, database: str, table: str) -> list[str]:
+def list_columns(engine, database: str, table: str) -> list[dict]:
     db = _check_identifier(database, "database")
     tbl = _check_identifier(table, "table")
     with engine.connect() as conn:
-        return [row[0] for row in conn.execute(text(f"SHOW COLUMNS FROM `{db}`.`{tbl}`"))]
+        rows = conn.execute(text(f"SHOW COLUMNS FROM `{db}`.`{tbl}`")).mappings().all()
+    return [{"name": r["Field"], "type": r["Type"], "key": r["Key"], "nullable": r["Null"]} for r in rows]
 
+
+# ---------- Schema for RAG ----------
+
+def read_schema(engine, databases: list[str]) -> list[dict]:
+    """Structure of every table: columns + types, primary key, foreign keys (no data)."""
+    if not databases:
+        return []
+    params = {f"d{i}": d for i, d in enumerate(databases)}
+    in_list = ", ".join(f":{k}" for k in params)
+    with engine.connect() as conn:
+        columns = conn.execute(text(
+            f"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_KEY "
+            f"FROM information_schema.COLUMNS WHERE TABLE_SCHEMA IN ({in_list}) "
+            f"ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"), params).fetchall()
+        fks = conn.execute(text(
+            f"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, "
+            f"REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE "
+            f"WHERE TABLE_SCHEMA IN ({in_list}) AND REFERENCED_TABLE_NAME IS NOT NULL"), params).fetchall()
+
+    tables: dict[str, dict] = {}
+    for schema, table, column, col_type, key in columns:
+        name = f"{schema}.{table}"
+        if name not in tables:
+            if len(tables) >= MAX_TABLES_TO_INDEX:
+                continue
+            tables[name] = {"name": name, "database": schema, "table": table,
+                            "columns": [], "primary_key": [], "foreign_keys": []}
+        tables[name]["columns"].append({"name": column, "type": col_type})
+        if key == "PRI":
+            tables[name]["primary_key"].append(column)
+    for schema, table, column, ref_schema, ref_table, ref_column in fks:
+        name = f"{schema}.{table}"
+        if name in tables:
+            tables[name]["foreign_keys"].append(
+                {"column": column, "ref_table": f"{ref_schema}.{ref_table}", "ref_column": ref_column})
+    return list(tables.values())
+
+
+def schema_hash(schema: list[dict]) -> str:
+    """Fingerprint of the schema structure. Changes only when tables/columns/keys change."""
+    return hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()
+
+
+def add_sample_values(engine, schema: list[dict], per_column: int = 3) -> None:
+    """Add up to `per_column` distinct example values to each column (skips sensitive/long columns)."""
+    with engine.connect() as conn:
+        conn.execute(text(f"SET SESSION max_execution_time = {QUERY_TIMEOUT_SECONDS * 1000}"))
+        for table in schema:
+            db_name = _check_identifier(table["database"], "database")
+            tbl = _check_identifier(table["table"], "table")
+            for col in table["columns"]:
+                col["samples"] = []
+                skip_type = re.match(r"(tiny|medium|long)?(blob|text)|binary|varbinary|json|geometry", col["type"])
+                if SENSITIVE_COLUMN.search(col["name"]) or skip_type or not SAFE_IDENTIFIER.fullmatch(col["name"]):
+                    continue
+                try:
+                    rows = conn.execute(text(
+                        f"SELECT DISTINCT `{col['name']}` FROM `{db_name}`.`{tbl}` "
+                        f"WHERE `{col['name']}` IS NOT NULL LIMIT {per_column}")).fetchall()
+                    col["samples"] = [str(r[0])[:40] for r in rows]
+                except Exception:
+                    pass  # samples are optional; never fail indexing because of one column
+
+
+# ---------- Running queries ----------
 
 def explain(engine, sql: str) -> None:
     """Run EXPLAIN on validated SQL to check it against the real schema. Raises on error."""
@@ -103,5 +214,9 @@ def run_query(engine, sql: str) -> list[dict]:
         # MySQL/TiDB stop any SELECT that runs longer than this (value in milliseconds).
         conn.execute(text(f"SET SESSION max_execution_time = {QUERY_TIMEOUT_SECONDS * 1000}"))
         result = conn.execute(text(sql))
-        columns = list(result.keys())
+        # Rename duplicate column names (e.g. a.id, b.id -> id, id_2) so no data is lost.
+        seen, columns = {}, []
+        for name in result.keys():
+            seen[name] = seen.get(name, 0) + 1
+            columns.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
         return [dict(zip(columns, row)) for row in result.fetchall()]
