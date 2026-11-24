@@ -133,6 +133,15 @@ def seed_examples(conn_key: str) -> int:
     return collection.count()
 
 
+def reset_examples(conn_key: str) -> int:
+    """Delete the examples collection and re-seed it from few_shot.json (used by eval.py)."""
+    try:
+        _chroma().delete_collection(f"fewshot_{conn_key}")
+    except Exception:
+        pass  # didn't exist yet
+    return seed_examples(conn_key)
+
+
 def add_example(conn_key: str, question: str, sql: str) -> None:
     """Save a question->SQL pair the user liked (👍) so similar questions get it as an example."""
     _examples_collection(conn_key).upsert(

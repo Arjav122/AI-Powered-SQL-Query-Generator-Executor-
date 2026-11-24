@@ -1,46 +1,42 @@
 [
   {
-    "question": "List all courses with their fees",
-    "sql": "SELECT course_name, fees FROM college.course"
+    "question": "List all product lines",
+    "sql": "SELECT productLine FROM classicmodels.productlines"
   },
   {
-    "question": "Which course has the highest fees?",
-    "sql": "SELECT course_name, fees FROM college.course ORDER BY fees DESC LIMIT 1"
+    "question": "How many customers are there in each country?",
+    "sql": "SELECT country, COUNT(*) AS customers FROM classicmodels.customers GROUP BY country ORDER BY customers DESC"
   },
   {
-    "question": "Show each student's name with the course they are enrolled in",
-    "sql": "SELECT si.name, c.course_name FROM college.student_info AS si JOIN college.course AS c ON c.student_id = si.student_id"
+    "question": "Top 5 customers by credit limit",
+    "sql": "SELECT customerName, creditLimit FROM classicmodels.customers ORDER BY creditLimit DESC LIMIT 5"
   },
   {
-    "question": "Total fees collected from students in each city",
-    "sql": "SELECT si.city, SUM(c.fees) AS total_fees FROM college.student_info AS si JOIN college.course AS c ON c.student_id = si.student_id GROUP BY si.city ORDER BY total_fees DESC"
+    "question": "Show each employee with the city of their office",
+    "sql": "SELECT e.firstName, e.lastName, o.city FROM classicmodels.employees AS e JOIN classicmodels.offices AS o ON o.officeCode = e.officeCode"
   },
   {
-    "question": "How many students are there in each city?",
-    "sql": "SELECT city, COUNT(*) AS students FROM college.student_info GROUP BY city ORDER BY students DESC"
+    "question": "Total amount paid by each customer",
+    "sql": "SELECT c.customerName, SUM(p.amount) AS total_paid FROM classicmodels.customers AS c JOIN classicmodels.payments AS p ON p.customerNumber = c.customerNumber GROUP BY c.customerNumber, c.customerName ORDER BY total_paid DESC"
   },
   {
-    "question": "Average marks for each grade",
-    "sql": "SELECT grade, AVG(marks) AS avg_marks FROM college.student2 GROUP BY grade ORDER BY grade"
+    "question": "Revenue for each order",
+    "sql": "SELECT orderNumber, SUM(quantityOrdered * priceEach) AS revenue FROM classicmodels.orderdetails GROUP BY orderNumber ORDER BY revenue DESC"
   },
   {
-    "question": "Top 3 students by marks",
-    "sql": "SELECT name, marks FROM college.student2 ORDER BY marks DESC LIMIT 3"
+    "question": "Number of orders per month in 2004",
+    "sql": "SELECT DATE_FORMAT(orderDate, '%Y-%m') AS month, COUNT(*) AS orders FROM classicmodels.orders WHERE YEAR(orderDate) = 2004 GROUP BY month ORDER BY month"
   },
   {
-    "question": "Students who scored more than the average marks",
-    "sql": "SELECT name, marks FROM college.student2 WHERE marks > (SELECT AVG(marks) FROM college.student2)"
+    "question": "Which products have never been ordered?",
+    "sql": "SELECT p.productName FROM classicmodels.products AS p LEFT JOIN classicmodels.orderdetails AS od ON od.productCode = p.productCode WHERE od.productCode IS NULL"
   },
   {
-    "question": "Average salary by gender",
-    "sql": "SELECT gender, AVG(salary) AS avg_salary FROM test.users GROUP BY gender"
+    "question": "Show each employee with the name of their manager",
+    "sql": "SELECT e.firstName, e.lastName, m.firstName AS managerFirstName, m.lastName AS managerLastName FROM classicmodels.employees AS e LEFT JOIN classicmodels.employees AS m ON m.employeeNumber = e.reportsTo"
   },
   {
-    "question": "How many users signed up each month?",
-    "sql": "SELECT DATE_FORMAT(created_at, '%Y-%m') AS month, COUNT(*) AS signups FROM test.users GROUP BY month ORDER BY month"
-  },
-  {
-    "question": "Users born after the year 1995",
-    "sql": "SELECT name, date_of_birth FROM test.users WHERE date_of_birth >= '1996-01-01' ORDER BY date_of_birth"
+    "question": "Which orders have not been shipped yet?",
+    "sql": "SELECT orderNumber, orderDate, status FROM classicmodels.orders WHERE shippedDate IS NULL"
   }
 ]
