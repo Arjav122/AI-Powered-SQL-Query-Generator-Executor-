@@ -1,5 +1,7 @@
 # 🧠 AI SQL Assistant
 
+[![tests](https://github.com/Arjav122/AI-Powered-SQL-Query-Generator-Executor-/actions/workflows/tests.yml/badge.svg)](https://github.com/Arjav122/AI-Powered-SQL-Query-Generator-Executor-/actions/workflows/tests.yml)
+
 Ask questions about a MySQL database in plain English and get a **safe, read-only SQL query**, a plain-English
 explanation, and the results as a table and chart.
 
@@ -7,11 +9,14 @@ The app finds the relevant tables with **RAG** (ChromaDB + OpenAI embeddings), w
 chat model, checks it against the real database with `EXPLAIN` (and fixes it if it fails), and blocks anything that
 could change data.
 
-**96.7% execution accuracy** on a 30-question benchmark. On a 65-table schema, RAG cut prompt tokens by **79%**
-(9,203 → 1,973) and was more accurate than sending the full schema (96.7% vs 90.0–93.3% across runs) ([results](#-evaluation-results)).
+**96.7% execution accuracy** on a 30-question benchmark. On a 65-table schema, RAG cut prompt tokens by **78%**
+(9,263 → 2,033) and scored 96.7% in every run, while sending the full schema varied between 90.0% and 96.7%
+([results](#-evaluation-results)).
 
 **Tech:** Python 3.11 · Streamlit · FastAPI · SQLAlchemy + PyMySQL · MySQL / TiDB Cloud · OpenAI (`gpt-4o-mini`,
-`text-embedding-3-small`) · ChromaDB · sqlglot · pandas
+`text-embedding-3-small`) · ChromaDB · sqlglot · pandas · pytest · GitHub Actions
+
+![AI SQL Assistant: question, retrieved tables, explanation, SQL, results and chart](screenshot.png)
 
 ---
 
@@ -23,6 +28,7 @@ could change data.
 | **Few-shot examples** | Adds the 3 most similar question→SQL examples to the prompt (seeded from `few_shot.json`). 👍 on a good result saves it as a new example. |
 | **Structured output** | The model returns JSON `{sql, explanation, tables_used}`; the explanation is shown before you run anything. |
 | **Self-correction** | Generated SQL is checked with `EXPLAIN`. If MySQL rejects it, the SQL + error go back to the model (max 3 attempts, all shown in the UI). |
+| **Clarifying questions** | If a request is too ambiguous to answer without guessing, the model asks one short question instead of writing SQL. |
 | **Safety** | sqlglot parsing: exactly one statement, only `SELECT` / `WITH…SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`; auto `LIMIT 100`; 10-second timeout. |
 | **Two connection modes** | *Demo database* (from `.env` / secrets) or *Connect my own* (host, port, user, password, database, SSL). |
 | **Results** | Table, CSV download, automatic chart (text + number → bar, date + number → line). |
@@ -32,6 +38,7 @@ could change data.
 | **Schema browser** | Databases → tables → columns (type, key, nullable). |
 | **REST API** | Optional FastAPI wrapper over the same functions (`/docs`). |
 | **Evaluation** | `eval.py` measures execution accuracy, prompt tokens and latency, full schema vs RAG + few-shot. |
+| **Tests + CI** | 40 pytest unit tests (safety, SSRF blocking, permission check, retrieval, self-correction, eval scoring) run on every push with GitHub Actions. No database or API key needed. |
 
 ## 🏗️ Architecture
 
@@ -74,10 +81,25 @@ flowchart LR
 ├── eval.py              Evaluation script
 ├── eval_questions.json  30 test questions with gold SQL
 ├── eval_results.json    Latest evaluation output (per-question details)
+├── city_hospital.sql    Generated 51-table demo database, used as distractors in the large-schema test
+├── test_project.py      pytest unit tests
+├── screenshot.png       App screenshot (above)
 ├── requirements.txt     Pinned dependencies
 ├── .env.example         Settings template
+├── .github/workflows/tests.yml   CI: runs the tests on every push
 └── .gitignore
 ```
+
+## 🧪 Tests
+
+```bash
+pip install pytest
+pytest -q          # 40 tests, about 2 seconds, no database or OpenAI key needed
+```
+
+The tests cover the safety layer (allowed and blocked queries, auto LIMIT), SSRF blocking, the write-permission
+check, retrieval with foreign-key expansion and the database filter (in-memory ChromaDB with fake embeddings), the
+self-correction loop and clarifying questions (model calls mocked), and the evaluation's result comparison.
 
 ## 🚀 Run locally
 
@@ -178,33 +200,37 @@ copy of `few_shot.json`, so 👍 clicks can't leak test answers into the evaluat
 Two experiments, same 30 questions (all about classicmodels), `gpt-4o-mini`, temperature 0, run 2026-11-24:
 
 - **Small schema:** only classicmodels (8 tables), `MYSQL_DATABASE=classicmodels`.
-- **Large schema:** classicmodels plus 57 unrelated tables (a generated 51-table `city_hospital` database, plus
-  `college` and `test`), 65 tables in total, `MYSQL_DATABASE=` (empty). The extra tables act as distractors, like a
-  real company database where most tables are irrelevant to any one question.
+- **Large schema:** classicmodels plus 57 unrelated tables (the generated 51-table `city_hospital` database from
+  [`city_hospital.sql`](city_hospital.sql), plus two tiny databases), 65 tables in total, `MYSQL_DATABASE=` (empty).
+  The extra tables act as distractors, like a real company database where most tables are irrelevant to any one question.
 
 | Metric | Small: full schema | Small: RAG | **Large: full schema** | **Large: RAG** |
 |---|---:|---:|---:|---:|
-| **Execution accuracy** | 96.7% | 96.7% | 90.0% | **96.7%** |
+| **Execution accuracy (latest run)** | 96.7% | 96.7% | 96.7% | **96.7%** |
+| Accuracy across 3 large-schema runs | — | — | 93.3% · 90.0% · 96.7% | **96.7% · 96.7% · 96.7%** |
 | Easy (8) | 100% | 100% | 100% | 100% |
 | Joins (8) | 87.5% | 87.5% | 87.5% | 87.5% |
-| Aggregation (7) | 100% | 100% | 85.7% | **100%** |
-| Dates (7) | 100% | 100% | 85.7% | **100%** |
-| Avg prompt tokens | 1,904 | 1,814 | 9,203 | **1,973 (−79%)** |
-| Avg latency | 2.52 s | 2.94 s | 2.31 s | 2.70 s |
+| Aggregation (7) | 100% | 100% | 100% | 100% |
+| Dates (7) | 100% | 100% | 100% | 100% |
+| Avg prompt tokens | 1,904 | 1,814 | 9,263 | **2,033 (−78%)** |
+| Avg latency | 2.52 s | 2.94 s | 2.96 s | 2.84 s |
 | Avg tables sent | 8 | 7.1 | 65 | **8.6** |
 | Needed tables included in prompt | 100% | 100% | 100% | 100% |
 | Queries fixed by self-correction | 1 | 0 | 0 | 0 |
 
 **What the numbers say**
 
-- **RAG scales.** As the schema grew from 8 to 65 tables, full-schema prompts grew about 5× (1,904 → 9,203 tokens), while RAG prompts stayed almost flat (1,814 → 1,973) because it still sends only about 9 tables. On a large schema that is a **79% token (cost) saving**, with the needed tables retrieved 100% of the time.
-- **Fewer distractions, better accuracy.** With 65 tables, full-schema mode answered *"total payment amount received in each year"* from `city_hospital.invoices` instead of `classicmodels.payments`, and joined the wrong table for *"average credit limit per country"*. RAG never saw the hospital tables and got both right.
-- **Run-to-run variation.** Even at temperature 0 the model's output varies slightly. Across two 65-table runs, full schema scored 93.3% and 90.0%, while RAG scored 96.7% both times. The table shows the latest run.
+- **RAG scales.** As the schema grew from 8 to 65 tables, full-schema prompts grew about 5× (1,904 → 9,263 tokens), while RAG prompts stayed almost flat (1,814 → 2,033) because it still sends only about 9 tables. On a large schema that is a **78% token (cost) saving**, with the needed tables retrieved 100% of the time.
+- **RAG is more stable.** RAG scored 96.7% in all three large-schema runs. Full schema varied between 90.0% and 96.7%: in two runs it answered *"total payment amount received in each year"* from `city_hospital.invoices` instead of `classicmodels.payments`, and once it joined the wrong table for *"average credit limit per country"*. RAG never saw the hospital tables.
+- **The accuracy gap is small.** On 30 questions, one or two answers is 3–7 percentage points, so the token saving and stability are the stronger results; proving an accuracy gain needs a larger benchmark with look-alike tables.
 - **The one miss in every run:** *"For each sales rep, show … the number of customers they manage."* The model listed all 23 employees (including the President with 0 customers) instead of only sales reps.
-- **Latency.** RAG adds about 0.4 s for the embedding call; the token saving matters more for cost.
+- **Clarifying questions** (added before the third run) never fired on the benchmark questions, so the feature does not over-ask on clear questions.
+- **Latency** is about the same: RAG adds an embedding call but sends a much smaller prompt.
 - **Small schemas.** With only 8 highly connected tables, RAG matches full-schema accuracy and saves just 5%, because top-5 + foreign-key neighbours already covers most tables.
 
-Per-question details for the latest (65-table) run are in [`eval_results.json`](eval_results.json).
+**Reproduce the large-schema run:** load `city_hospital.sql` in MySQL Workbench (it creates only the new
+`city_hospital` database), set `MYSQL_DATABASE=` (empty), then run `python eval.py`. Per-question details for the
+latest run are in [`eval_results.json`](eval_results.json).
 
 ## 🔒 Security
 
@@ -240,14 +266,12 @@ Put this user in `MYSQL_USER` / `MYSQL_PASSWORD`. Even if a bad query slipped pa
 ## ⚠️ Limitations
 
 - Only MySQL-compatible databases (MySQL, TiDB, MariaDB).
-- Ambiguous questions are answered with a best guess instead of a clarifying question (this caused the one benchmark miss).
+- Clarifying questions only fire for clearly ambiguous requests; a misread term (the "sales rep" miss) can still slip through.
 - The benchmark is small (30 questions). The large-schema test uses generated distractor tables, not a real production schema.
 - On Streamlit Cloud, 👍 examples are lost when the app restarts. User connections stay in server memory until the user switches database or the app restarts.
 
 ## 🔮 Future work
 
 - Rerank retrieved tables (cross-encoder or LLM) for very large schemas.
-- Ask a clarifying question when a request is ambiguous.
 - Store 👍 examples in a database so they survive restarts.
-- pytest unit tests and a GitHub Actions workflow.
 - A larger benchmark (e.g. a Spider subset) to measure RAG on big schemas.

@@ -18,8 +18,11 @@ Rules:
 - Prefer JOINs over subqueries; join on matching key columns. Use GROUP BY for aggregations.
 - UNION branches must return the same number of compatible columns.
 - Use SELECT * only when the user asks for all details.
+- Only if the question truly cannot be answered without guessing something that changes the result
+  (for example two very different meanings), return "sql": "" and ask ONE short question in "clarification".
+  Otherwise always answer; do not ask when a reasonable reading exists.
 Reply with JSON only:
-{"sql": "<one MySQL query>", "explanation": "<1-2 plain English sentences>", "tables_used": ["db.table", ...]}"""
+{"sql": "<one MySQL query>", "explanation": "<1-2 plain English sentences>", "tables_used": ["db.table", ...], "clarification": ""}"""
 
 
 def get_client() -> OpenAI:
@@ -67,6 +70,7 @@ def _chat_json(messages: list[dict]) -> tuple[dict, int]:
     reply["sql"] = sql
     reply["explanation"] = str(reply.get("explanation") or "")
     reply["tables_used"] = list(reply.get("tables_used") or [])
+    reply["clarification"] = str(reply.get("clarification") or "").strip()
     return reply, response.usage.prompt_tokens if response.usage else 0
 
 
@@ -82,8 +86,9 @@ def generate_sql(engine, cfg: dict, question: str, use_rag: bool = True, k: int 
                  examples_key: str | None = None, database: str | None = None) -> dict:
     """Generate SQL, then self-correct up to MAX_ATTEMPTS times using EXPLAIN errors.
 
-    Returns {"sql", "explanation", "tables_used", "retrieved", "examples", "attempts", "prompt_tokens", "error"}.
-    "error" is None on success. "attempts" lists every try as {"sql", "error"}.
+    Returns {"sql", "explanation", "tables_used", "retrieved", "examples", "attempts", "prompt_tokens",
+    "clarification", "error"}. "error" is None on success. "clarification" is a question for the user when
+    the request is too ambiguous to answer (then "sql" is empty). "attempts" lists every try as {"sql", "error"}.
     """
     context = build_context(cfg, question, use_rag, k, examples_key, database)
     if not context["tables"]:
@@ -97,6 +102,7 @@ def generate_sql(engine, cfg: dict, question: str, use_rag: bool = True, k: int 
     messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
     result = {
         "sql": "", "explanation": "", "tables_used": [], "attempts": [], "prompt_tokens": 0, "error": None,
+        "clarification": "",
         "retrieved": [{"name": t["name"], "via": t["via"]} for t in context["tables"]],
         "examples": context["examples"],
     }
@@ -106,6 +112,10 @@ def generate_sql(engine, cfg: dict, question: str, use_rag: bool = True, k: int 
         result["prompt_tokens"] += tokens
         result.update(sql=reply["sql"], explanation=reply["explanation"], tables_used=reply["tables_used"])
 
+        if not reply["sql"] and reply["clarification"]:  # too ambiguous: ask the user instead of guessing
+            result["clarification"] = reply["clarification"]
+            result["attempts"].append({"sql": "", "error": f"Asked: {reply['clarification']}"})
+            return result
         if not reply["sql"]:  # model refused (e.g. user asked to delete data)
             result["error"] = reply["explanation"] or "The model did not return SQL."
             result["attempts"].append({"sql": "", "error": result["error"]})

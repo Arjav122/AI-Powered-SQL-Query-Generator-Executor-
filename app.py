@@ -213,7 +213,7 @@ with ask_tab:
             except Exception as exc:
                 gen = {"error": str(exc), "sql": "", "attempts": [], "retrieved": [], "explanation": ""}
             ss.generation, ss.result = gen, None
-            if not gen["error"]:
+            if not gen["error"] and gen["sql"]:
                 ss.history.insert(0, {"question": question, "sql": gen["sql"], "generation": gen,
                                       "conn_key": conn_key})
                 del ss.history[20:]
@@ -230,6 +230,8 @@ with ask_tab:
                 st.caption("Blue = similar to your question · Orange = linked by a foreign key")
         if gen.get("error"):
             st.error(f"Could not generate SQL: {gen['error']}")
+        elif gen.get("clarification"):
+            st.info(f"🤔 **Can you clarify?** {gen['clarification']}  \nAdd the detail to your question and click Generate again.")
         else:
             st.markdown(f"**What this query does:** {gen['explanation']}")
         attempts = gen.get("attempts", [])
