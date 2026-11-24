@@ -1,14 +1,15 @@
-streamlit
-fastapi
-uvicorn
-sqlalchemy
-pymysql
-cryptography  # needed by pymysql for MySQL 8 default login (caching_sha2_password)
-certifi       # CA certificates for SSL connections (TiDB Cloud)
-openai
-chromadb      # vector store for schema + few-shot retrieval
-sqlglot       # parses SQL into a tree for read-only validation
-pandas
-python-dotenv
+# Versions pinned to the ones this project was tested with (Python 3.11).
+streamlit==1.67.0
+fastapi==0.121.3
+uvicorn==0.38.0
+sqlalchemy==2.0.44
+pymysql==1.2.4
+cryptography==50.0.2  # needed by pymysql for MySQL 8 default login (caching_sha2_password)
+certifi>=2025.11.12   # CA certificates for SSL connections (TiDB Cloud); newer is fine
+openai==2.8.1
+chromadb==1.5.9       # vector store for schema + few-shot retrieval
+sqlglot==30.34.0      # parses SQL into a tree for read-only validation
+pandas==3.1.1
+python-dotenv==1.2.4
 # Streamlit Cloud's sqlite3 is too old for ChromaDB; app.py swaps in this one. Linux-only wheel, skipped on Windows/macOS.
-pysqlite3-binary; sys_platform == "linux"
+pysqlite3-binary==0.5.4.post2; sys_platform == "linux"

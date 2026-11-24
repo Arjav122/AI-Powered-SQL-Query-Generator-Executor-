@@ -1,7 +1,6 @@
 .env
 .streamlit/secrets.toml
 chroma_data/
-eval_results.json
 venv/
 __pycache__/
 *.pyc

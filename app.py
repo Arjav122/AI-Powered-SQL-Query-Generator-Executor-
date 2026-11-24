@@ -9,7 +9,6 @@ except ImportError:
 
 import datetime
 import decimal
-import re
 
 import pandas as pd
 import streamlit as st
@@ -172,9 +171,11 @@ with st.sidebar:
         st.caption("ℹ️ Table/column names and a few sample values are sent to OpenAI to generate SQL.")
 
     st.header("History")
-    if not ss.history:
-        st.caption("Your last 20 questions will appear here.")
-    for i, item in enumerate(ss.history):
+    current_key = conn_key if cfg is not None else None
+    history = [(i, item) for i, item in enumerate(ss.history) if item.get("conn_key") == current_key]
+    if not history:
+        st.caption("Your last 20 questions for this database will appear here.")
+    for i, item in history:
         mark = {"up": "👍 ", "down": "👎 "}.get(item.get("feedback"), "")
         if st.button(f"{mark}{item['question'][:45]}", key=f"history_{i}", width="stretch"):
             ss.pending_question, ss.pending_sql_box = item["question"], item["sql"]
@@ -203,7 +204,8 @@ with ask_tab:
                 gen = {"error": str(exc), "sql": "", "attempts": [], "retrieved": [], "explanation": ""}
             ss.generation, ss.result = gen, None
             if not gen["error"]:
-                ss.history.insert(0, {"question": question, "sql": gen["sql"], "generation": gen})
+                ss.history.insert(0, {"question": question, "sql": gen["sql"], "generation": gen,
+                                      "conn_key": conn_key})
                 del ss.history[20:]
             ss.pending_sql_box = gen["sql"]
             st.rerun()
@@ -233,11 +235,14 @@ with ask_tab:
     run_col, explain_col, _ = st.columns([1, 1, 3])
     run_clicked = run_col.button("Run query", type="primary", width="stretch")
     if explain_col.button("Explain SQL", width="stretch"):
-        try:
-            with st.spinner("Explaining..."):
-                st.info(llm.explain_sql(sql_text))
-        except Exception as exc:
-            st.error(f"Could not explain SQL: {exc}")
+        if not sql_text.strip():
+            st.warning("There is no SQL to explain yet.")
+        else:
+            try:
+                with st.spinner("Explaining..."):
+                    st.info(llm.explain_sql(sql_text))
+            except Exception as exc:
+                st.error(f"Could not explain SQL: {exc}")
 
     if run_clicked:
         original = sql_text.strip().rstrip(";").strip()

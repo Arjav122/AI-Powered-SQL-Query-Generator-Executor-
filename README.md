@@ -1,27 +1,37 @@
-# AI SQL Assistant
+# 🧠 AI SQL Assistant
 
-Ask questions about a MySQL database in plain English. The app finds the relevant tables (RAG),
-writes **one read-only SQL query** with OpenAI, explains it, checks it with `EXPLAIN` (and fixes it
-if it fails), runs it safely, and shows the results as a table and chart.
+Ask questions about a MySQL database in plain English and get a **safe, read-only SQL query**, a plain-English
+explanation, and the results as a table and chart.
 
-Built with Python, Streamlit, FastAPI, SQLAlchemy, MySQL / TiDB Cloud, OpenAI, ChromaDB and sqlglot.
+The app finds the relevant tables with **RAG** (ChromaDB + OpenAI embeddings), writes the query with an OpenAI
+chat model, checks it against the real database with `EXPLAIN` (and fixes it if it fails), and blocks anything that
+could change data.
 
-## Features
+**96.7% execution accuracy** on a 30-question benchmark ([results](#-evaluation-results)).
 
-- **Schema-aware RAG**: one ChromaDB document per table (columns, types, primary/foreign keys, up to 3 sample
-  values per column; columns like `email`/`phone`/`password`/`token` get no samples). The question is embedded,
-  the top-5 tables are retrieved, and tables linked by a foreign key (1 hop) are added. Only those tables go to the LLM.
-  The index is rebuilt only when the schema hash changes (or on **Re-index**).
-- **Few-shot examples**: the 3 most similar question→SQL pairs (seeded from `few_shot.json`) are added to the prompt.
-  👍 on a result saves it as a new example.
-- **Structured generation**: the model returns JSON `{sql, explanation, tables_used}`; the explanation is shown before running.
-- **Self-correction**: generated SQL is checked with `EXPLAIN`; on error, the SQL + MySQL error go back to the model (max 3 attempts, shown in an expander).
-- **Safety** (sqlglot): exactly one statement; only `SELECT`, `WITH…SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`; auto `LIMIT 100`; 10 s timeout.
-- **Two connection modes**: the demo database (from secrets/.env) or *Connect my own* (host, port, user, password, database, SSL).
-- **Results**: table, CSV download, automatic chart (text + number → bar, date + number → line), last-20 query history.
-- **Evaluation**: `eval.py` measures execution accuracy on 30 questions, full-schema vs RAG + few-shot.
+**Tech:** Python 3.11 · Streamlit · FastAPI · SQLAlchemy + PyMySQL · MySQL / TiDB Cloud · OpenAI (`gpt-4o-mini`,
+`text-embedding-3-small`) · ChromaDB · sqlglot · pandas
 
-## Architecture
+---
+
+## ✨ Features
+
+| Area | What it does |
+|---|---|
+| **Schema-aware RAG** | Indexes one ChromaDB document per table (columns, types, primary/foreign keys, up to 3 sample values per column). For each question it retrieves the top-5 tables, adds tables linked by a foreign key (1 hop), and sends **only those** to the LLM. A schema hash means it re-indexes only when the structure changes. |
+| **Few-shot examples** | Adds the 3 most similar question→SQL examples to the prompt (seeded from `few_shot.json`). 👍 on a good result saves it as a new example. |
+| **Structured output** | The model returns JSON `{sql, explanation, tables_used}`; the explanation is shown before you run anything. |
+| **Self-correction** | Generated SQL is checked with `EXPLAIN`. If MySQL rejects it, the SQL + error go back to the model (max 3 attempts, all shown in the UI). |
+| **Safety** | sqlglot parsing: exactly one statement, only `SELECT` / `WITH…SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`; auto `LIMIT 100`; 10-second timeout. |
+| **Two connection modes** | *Demo database* (from `.env` / secrets) or *Connect my own* (host, port, user, password, database, SSL). |
+| **Results** | Table, CSV download, automatic chart (text + number → bar, date + number → line). |
+| **History** | Last 20 questions per database in the sidebar; click to reload. |
+| **RAG toggle** | Turn RAG off to compare against sending the full schema. |
+| **Schema browser** | Databases → tables → columns (type, key, nullable). |
+| **REST API** | Optional FastAPI wrapper over the same functions (`/docs`). |
+| **Evaluation** | `eval.py` measures execution accuracy, prompt tokens and latency, full schema vs RAG + few-shot. |
+
+## 🏗️ Architecture
 
 ```mermaid
 flowchart LR
@@ -29,7 +39,7 @@ flowchart LR
     API["api.py<br/>FastAPI (optional)"] --> L
     A --> L["llm.py<br/>generate / fix / explain"]
     L --> R["rag.py<br/>retrieve tables + examples"]
-    R <--> C[("ChromaDB<br/>./chroma_data")]
+    R <--> C[("ChromaDB<br/>disk: demo DB<br/>memory: user DBs")]
     R --> E["OpenAI<br/>text-embedding-3-small"]
     L --> O["OpenAI chat model<br/>JSON: sql, explanation"]
     L --> S["safety.py<br/>sqlglot checks + LIMIT"]
@@ -39,68 +49,101 @@ flowchart LR
     D -. "schema + samples" .-> R
 ```
 
-**Request flow:** question → embed → top-k tables + FK neighbours + 3 examples → LLM returns JSON →
-sqlglot validation → `EXPLAIN` (retry with the error up to 3×) → user reviews/edits SQL → validated again → run with timeout → table + chart.
+**How a question is answered**
 
-## Files
+1. The question is embedded (`text-embedding-3-small`).
+2. ChromaDB returns the 5 most similar tables; tables linked by a foreign key are added; the 3 most similar examples are added.
+3. The chat model returns JSON with the SQL, an explanation and the tables used.
+4. `safety.py` validates the SQL with sqlglot and adds `LIMIT 100` if needed.
+5. `EXPLAIN` checks it against the real schema. On error, the model gets the error and tries again (up to 3 times).
+6. You review or edit the SQL. When you click **Run**, it is validated again and runs with a 10-second timeout.
+7. The results are shown as a table, a CSV download and a chart.
 
-| File | Purpose |
-|---|---|
-| `app.py` | Streamlit UI (calls the functions below directly) |
-| `api.py` | Optional thin FastAPI wrapper over the same functions (demo database) |
-| `db.py` | Config (st.secrets → .env), MySQL connection (SSL optional), schema reading, query execution |
-| `rag.py` | ChromaDB: schema index (hash-based re-index), table retrieval + FK expansion, few-shot examples |
-| `llm.py` | OpenAI prompts: generate SQL (JSON), self-correct, explain |
-| `safety.py` | sqlglot read-only validation + auto `LIMIT 100` (`python safety.py` shows examples) |
-| `few_shot.json` | 10 seed question→SQL examples for the demo database |
-| `eval.py` | Evaluation script (execution accuracy, tokens, latency) |
-| `eval_questions.json` | 30 test questions with gold SQL (easy / joins / aggregation / dates) |
+## 📁 Project structure
 
-## Setup (local)
+```
+├── app.py               Streamlit UI (calls the functions below directly)
+├── api.py               Optional thin FastAPI wrapper (demo database)
+├── db.py                Config, MySQL connection (SSL optional), schema reading, safe query execution
+├── rag.py               ChromaDB: schema index, table retrieval + FK expansion, few-shot examples
+├── llm.py               OpenAI prompts: generate SQL (JSON), self-correct, explain
+├── safety.py            sqlglot read-only validation + auto LIMIT  (python safety.py shows examples)
+├── few_shot.json        10 seed question→SQL examples for the demo database
+├── eval.py              Evaluation script
+├── eval_questions.json  30 test questions with gold SQL
+├── eval_results.json    Latest evaluation output (per-question details)
+├── requirements.txt     Pinned dependencies
+├── .env.example         Settings template
+└── .gitignore
+```
 
-The demo database is MySQL's free **classicmodels** sample database (customers, orders, payments, products, employees, offices).
-Load `mysqlsampledatabase.sql` from mysqltutorial.org in MySQL Workbench (File → Open SQL Script → ⚡ run).
+## 🚀 Run locally
+
+**1. Load the demo database.** The demo uses MySQL's free **classicmodels** sample database (customers, orders,
+order details, payments, products, product lines, employees, offices). Download `mysqlsampledatabase.zip` from
+mysqltutorial.org, unzip it, then in MySQL Workbench open `mysqlsampledatabase.sql` (File → Open SQL Script) and click ⚡.
+
+**2. Install.**
 
 ```bash
 python -m venv venv
-venv\Scripts\activate          # macOS/Linux: source venv/bin/activate
+venv\Scripts\activate            # macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env         # macOS/Linux: cp .env.example .env
+copy .env.example .env           # macOS/Linux: cp .env.example .env
 ```
 
-Edit `.env`:
+**3. Configure `.env`.**
 
-| Setting | Example |
-|---|---|
-| `MYSQL_HOST`, `MYSQL_PORT` | `localhost`, `3306` |
-| `MYSQL_USER`, `MYSQL_PASSWORD` | a read-only user (see below) |
-| `MYSQL_DATABASE` | `classicmodels` (empty = all non-system databases) |
-| `MYSQL_SSL` | `false` locally, `true` for TiDB Cloud |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | your key, `gpt-4o-mini` |
+| Setting | Example | Notes |
+|---|---|---|
+| `MYSQL_HOST` / `MYSQL_PORT` | `localhost` / `3306` | |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | `sql_assistant_ro` / … | Use a read-only user ([how](#use-a-read-only-mysql-user)) |
+| `MYSQL_DATABASE` | `classicmodels` | Empty = all non-system databases |
+| `MYSQL_SSL` | `false` | `true` for TiDB Cloud |
+| `OPENAI_API_KEY` | `sk-…` | |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Any OpenAI chat model with JSON mode |
 
-Run:
+Settings are read from Streamlit secrets (`.streamlit/secrets.toml`) first, then from `.env`.
+
+**4. Start.**
 
 ```bash
 streamlit run app.py
 ```
 
-Optional REST API (open http://127.0.0.1:8000/docs):
+Optional REST API (then open http://127.0.0.1:8000/docs):
 
 ```bash
 uvicorn api:app --reload
 ```
 
-## Deploy on Streamlit Community Cloud + TiDB Cloud
+**Try asking:** *"Total sales for each product line"* (bar chart) · *"Total payments for each year"* (line chart) ·
+*"Which customers have never placed an order?"* · *"Delete all customers"* (refused).
 
-Only the secrets change; the code is the same.
+## 🔌 Connecting your own database
 
-1. **Create the database**: sign up at tidbcloud.com → create a free *Serverless* cluster → **Connect** → note the
-   host, port (`4000`), user (looks like `xxxx.root`) and password.
-2. **Load the demo data**: run `mysqlsampledatabase.sql` against TiDB (MySQL Workbench works: new connection with the
-   TiDB host/port/user, enable SSL "Require").
-3. **Push this repo to GitHub** (`.env` and `.streamlit/secrets.toml` are git-ignored).
-4. At share.streamlit.io → **Create app** → pick the repo, branch `master`, main file `app.py`.
-   Under *Advanced settings* choose Python 3.11 and paste the secrets:
+| Where the app runs | Your database | How |
+|---|---|---|
+| Your computer | MySQL on your computer (e.g. the one you use in Workbench) | Put its details in `.env` → **Demo database** mode |
+| Streamlit Cloud | A cloud MySQL (TiDB Cloud, AWS RDS, Azure, Aiven…) | **Connect my own** in the sidebar |
+| Streamlit Cloud | MySQL on someone's laptop | ❌ Not reachable from the internet. Copy the data to a cloud database first. |
+
+In *Connect my own* mode:
+
+- Hosts that resolve to local/private addresses (`localhost`, 127.x, 10.x, 172.16–31.x, 192.168.x, 169.254.x) are blocked, so the hosted app can't be used to reach internal networks (SSRF).
+- The connection is tested with `SELECT 1`. The app then reads the user's own permissions (`SHOW GRANTS`) and shows a ⚠️ warning if the account can change data.
+- Every feature works the same: RAG, safety, self-correction, charts and history. Few-shot examples start empty and grow with 👍.
+- The password lives only in the browser session. The schema index and examples are kept **in memory only**, never written to disk, and are dropped when you connect to a different database.
+
+## ☁️ Deploy (Streamlit Community Cloud + TiDB Cloud)
+
+Only the secrets change; the code stays the same.
+
+1. **Create the database.** At tidbcloud.com, create a free *Serverless* cluster → **Connect** → copy the host, port (`4000`), user (`xxxx.root`) and password.
+2. **Load the demo data.** In MySQL Workbench, add a connection with those details (SSL: *Require*) and run `mysqlsampledatabase.sql`.
+3. **Push this repo to GitHub.** `.env` and `.streamlit/secrets.toml` are git-ignored.
+4. **Create the app.** At share.streamlit.io → **Create app** → pick the repo, branch `master`, main file `app.py`.
+   Under *Advanced settings*, choose **Python 3.11** and paste:
 
    ```toml
    MYSQL_HOST = "gateway01.<region>.prod.aws.tidbcloud.com"
@@ -113,63 +156,60 @@ Only the secrets change; the code is the same.
    OPENAI_MODEL = "gpt-4o-mini"
    ```
 
-5. Deploy. On Linux, `pysqlite3-binary` is installed and `app.py` swaps it in for the old system `sqlite3` that ChromaDB can't use.
+5. **Deploy.** On Linux, `pysqlite3-binary` is installed and `app.py` swaps it in for the old system `sqlite3`, which ChromaDB can't use.
 
-> Streamlit Cloud's disk is temporary: `chroma_data/` is rebuilt automatically after a restart (a few cents of
-> embeddings), and examples added with 👍 are lost on restart.
+> Streamlit Cloud's disk is temporary. `chroma_data/` rebuilds automatically after a restart (about 1 cent of
+> embeddings), but examples saved with 👍 are lost.
 
-## Evaluation
+## 📊 Evaluation results
 
 ```bash
-python eval.py            # all 30 questions, both modes (~3 minutes)
+python eval.py            # all 30 questions, both modes (~3 minutes, a few cents)
 python eval.py --limit 5  # quick check
 ```
 
-**Metric: execution accuracy.** The generated SQL counts as correct if it returns the same rows as the gold SQL
-(order-insensitive, numbers to 2 decimals, column names ignored). Generated and gold SQL both go through the same
-safety layer. Few-shot examples come from a clean copy of `few_shot.json`, so 👍 clicks can't leak answers into the test.
+**Metric: execution accuracy.** A generated query is correct if it returns the same rows as the gold query
+(order-insensitive, numbers compared to 2 decimals, column names ignored). This is the standard text-to-SQL metric
+used by the Spider benchmark. Both queries go through the same safety layer. The few-shot examples come from a clean
+copy of `few_shot.json`, so 👍 clicks can't leak test answers into the evaluation.
 
-Results on classicmodels (8 tables), `gpt-4o-mini`, temperature 0, 30 questions (run 2026-11-24):
+**Setup:** classicmodels (8 tables), `gpt-4o-mini`, temperature 0, 30 questions, run 2026-11-24.
 
 | Metric | Full schema | RAG + few-shot |
 |---|---:|---:|
-| Execution accuracy | **96.7%** (29/30) | **96.7%** (29/30) |
-| — easy (8) | 100% | 100% |
-| — joins (8) | 87.5% | 87.5% |
-| — aggregation (7) | 100% | 100% |
-| — dates (7) | 100% | 100% |
+| **Execution accuracy** | **96.7%** (29/30) | **96.7%** (29/30) |
+| Easy (8) | 100% | 100% |
+| Joins (8) | 87.5% | 87.5% |
+| Aggregation (7) | 100% | 100% |
+| Dates (7) | 100% | 100% |
 | Avg prompt tokens | 1,904 | 1,814 (−4.7%) |
 | Avg latency | 2.52 s | 2.94 s |
 | Avg tables sent | 8 | 7.1 |
-| Gold tables included in prompt | 100% | 100% |
+| Needed tables included in prompt | 100% | 100% |
 | Queries fixed by self-correction | 1 | 0 |
 
-**What the numbers say:**
-- Both modes miss the same question ("for each sales rep…"): the model listed all 23 employees (including the President with 0 customers) instead of only sales reps.
-- On a schema this small, RAG keeps accuracy the same and saves only ~5% tokens. classicmodels is highly connected, so top-5 + foreign-key neighbours still pulls in ~7 of 8 tables. The embedding call adds ~0.4 s.
-  RAG matters more as schemas grow: with hundreds of tables the full schema doesn't fit in a prompt at all.
-- Self-correction rescued one query in full-schema mode (it failed `EXPLAIN` on the first try).
+**What the numbers say**
 
-Full per-question output is saved to `eval_results.json` (git-ignored; re-run to regenerate).
+- **The one miss** (both modes): *"For each sales rep, show … the number of customers they manage."* The model listed all 23 employees, including the President with 0 customers, instead of only sales reps.
+- **RAG on a small schema.** classicmodels is small and highly connected, so top-5 + foreign-key neighbours still pulls in about 7 of 8 tables. RAG keeps accuracy the same and saves only about 5% of tokens, while the embedding call adds about 0.4 s. RAG pays off on large schemas, where the full schema would not fit in a prompt.
+- **Self-correction** rescued one query that failed `EXPLAIN` on its first try.
 
-## Security notes
+Per-question details (generated SQL, errors, tokens, latency) are in [`eval_results.json`](eval_results.json).
 
-- SQL is parsed with sqlglot, not regex: exactly one statement, and only `SELECT` / `WITH…SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`.
-  Write clauses anywhere in the tree (`INSERT`, `UPDATE`, `DELETE`, DDL, `SELECT … INTO`, `FOR UPDATE`) and risky functions
-  (`LOAD_FILE`, `SLEEP`, `BENCHMARK`) are rejected with a clear reason. Unparseable SQL is rejected (fail closed).
-- `LIMIT 100` is added to `SELECT` queries that have no limit; queries time out after 10 s (`max_execution_time`).
-- *Connect my own* blocks hosts that resolve to loopback/private/link-local addresses (127.x, 10.x, 172.16–31.x, 192.168.x,
-  169.254.x), so the hosted app can't be used to probe internal networks. Credentials live only in `st.session_state`
-  and are never logged or saved. Their schema index and 👍 examples are kept in memory only (never written to disk)
-  and are dropped when the user connects to a different database.
-- After connecting, the app reads the user's own permissions (`SHOW GRANTS`) and shows a ⚠️ warning if the user can
-  change data (INSERT, UPDATE, DELETE, DROP, ALL, …), recommending a read-only user instead.
-- Table/column names and a few sample values are sent to OpenAI to generate SQL (shown in the UI).
-- `.env` and `.streamlit/secrets.toml` are git-ignored. Never commit real keys or passwords.
+## 🔒 Security
 
-### Use a read-only MySQL user (recommended)
+Defense in depth: no single layer has to be perfect.
 
-App-level checks are one layer; the database should be the second. Create a user that can only read:
+| Layer | Protection |
+|---|---|
+| Prompt | The model is told to write only read-only SQL and to refuse requests to change data. |
+| sqlglot | One statement only; only `SELECT` / `WITH…SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`. Write clauses anywhere in the tree (`INSERT`, `UPDATE`, `DELETE`, DDL, `SELECT … INTO`, `FOR UPDATE`) and risky functions (`LOAD_FILE`, `SLEEP`, `BENCHMARK`) are rejected. Unparseable SQL is rejected (fail closed). |
+| Limits | `LIMIT 100` added automatically; `max_execution_time` = 10 s. |
+| Network | User connections to local/private IPs are blocked (SSRF protection). |
+| Database | A read-only MySQL user means the database itself refuses any change (recommended below; the app warns if the user can write). |
+| Privacy | Passwords stay in session memory and are never logged. User schemas are never written to disk. Secrets files are git-ignored. Table/column names and a few sample values are sent to OpenAI (shown in the UI); columns like email, phone, password and token get no samples. |
+
+### Use a read-only MySQL user
 
 ```sql
 CREATE USER 'sql_assistant_ro'@'%' IDENTIFIED BY 'choose-a-strong-password';
@@ -177,4 +217,27 @@ GRANT SELECT, SHOW VIEW ON classicmodels.* TO 'sql_assistant_ro'@'%';
 FLUSH PRIVILEGES;
 ```
 
-Then put this user in `MYSQL_USER` / `MYSQL_PASSWORD`. Even if a bad query slipped past the app, MySQL itself would refuse to change data.
+Put this user in `MYSQL_USER` / `MYSQL_PASSWORD`. Even if a bad query slipped past the app, MySQL would refuse to change data.
+
+## 🧭 Design decisions
+
+- **Plain Python instead of LangChain/LangGraph.** The pipeline (retrieve → generate → validate → retry) is about 50 lines. Writing it directly keeps every step visible and easy to debug, and avoids a heavy dependency for little gain.
+- **Streamlit calls the functions directly.** Streamlit Cloud runs a single process, so the UI doesn't depend on a separate API server. FastAPI stays as an optional thin wrapper over the same code.
+- **sqlglot instead of regex.** Parsing understands the query's structure (two statements, hidden write clauses), and a column named `updated_at` is no longer blocked by mistake.
+- **`EXPLAIN` for self-correction.** It checks the query against the real schema without running it, and the error message tells the model exactly what to fix.
+- **One document per table, plus foreign-key expansion.** A table is the unit the model needs; following foreign keys adds the tables a JOIN requires even when they aren't textually similar to the question.
+
+## ⚠️ Limitations
+
+- Only MySQL-compatible databases (MySQL, TiDB, MariaDB).
+- Ambiguous questions are answered with a best guess instead of a clarifying question (this caused the one benchmark miss).
+- The benchmark is small (30 questions on 8 tables), so RAG's token savings are modest here.
+- On Streamlit Cloud, 👍 examples are lost when the app restarts. User connections stay in server memory until the user switches database or the app restarts.
+
+## 🔮 Future work
+
+- Rerank retrieved tables (cross-encoder or LLM) for very large schemas.
+- Ask a clarifying question when a request is ambiguous.
+- Store 👍 examples in a database so they survive restarts.
+- pytest unit tests and a GitHub Actions workflow.
+- A larger benchmark (e.g. a Spider subset) to measure RAG on big schemas.
