@@ -8,7 +8,7 @@ chat model, checks it against the real database with `EXPLAIN` (and fixes it if 
 could change data.
 
 **96.7% execution accuracy** on a 30-question benchmark. On a 65-table schema, RAG cut prompt tokens by **79%**
-(9,200 → 1,973) and was more accurate than sending the full schema (96.7% vs 93.3%) ([results](#-evaluation-results)).
+(9,203 → 1,973) and was more accurate than sending the full schema (96.7% vs 90.0–93.3% across runs) ([results](#-evaluation-results)).
 
 **Tech:** Python 3.11 · Streamlit · FastAPI · SQLAlchemy + PyMySQL · MySQL / TiDB Cloud · OpenAI (`gpt-4o-mini`,
 `text-embedding-3-small`) · ChromaDB · sqlglot · pandas
@@ -27,6 +27,7 @@ could change data.
 | **Two connection modes** | *Demo database* (from `.env` / secrets) or *Connect my own* (host, port, user, password, database, SSL). |
 | **Results** | Table, CSV download, automatic chart (text + number → bar, date + number → line). |
 | **History** | Last 20 questions per database in the sidebar; click to reload. |
+| **Database filter** | Sidebar dropdown: *All databases* or one database. Retrieval, full-schema mode and few-shot examples are limited to the chosen database, so a similar table in another database can't be picked. |
 | **RAG toggle** | Turn RAG off to compare against sending the full schema. |
 | **Schema browser** | Databases → tables → columns (type, key, nullable). |
 | **REST API** | Optional FastAPI wrapper over the same functions (`/docs`). |
@@ -99,7 +100,7 @@ copy .env.example .env           # macOS/Linux: cp .env.example .env
 |---|---|---|
 | `MYSQL_HOST` / `MYSQL_PORT` | `localhost` / `3306` | |
 | `MYSQL_USER` / `MYSQL_PASSWORD` | `sql_assistant_ro` / … | Use a read-only user ([how](#use-a-read-only-mysql-user)) |
-| `MYSQL_DATABASE` | `classicmodels` | Empty = all non-system databases |
+| `MYSQL_DATABASE` | empty | Empty = all non-system databases (pick one in the sidebar). Set one name to lock the app to that database. |
 | `MYSQL_SSL` | `false` | `true` for TiDB Cloud |
 | `OPENAI_API_KEY` | `sk-…` | |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Any OpenAI chat model with JSON mode |
@@ -133,7 +134,7 @@ In *Connect my own* mode:
 
 - Hosts that resolve to local/private addresses (`localhost`, 127.x, 10.x, 172.16–31.x, 192.168.x, 169.254.x) are blocked, so the hosted app can't be used to reach internal networks (SSRF).
 - The connection is tested with `SELECT 1`. The app then reads the user's own permissions (`SHOW GRANTS`) and shows a ⚠️ warning if the account can change data.
-- Every feature works the same: RAG, safety, self-correction, charts and history. Few-shot examples start empty and grow with 👍.
+- Every feature works the same: RAG, the Database filter, safety, self-correction, charts and history. Few-shot examples start empty and grow with 👍.
 - The password lives only in the browser session. The schema index and examples are kept **in memory only**, never written to disk, and are dropped when you connect to a different database.
 
 ## ☁️ Deploy (Streamlit Community Cloud + TiDB Cloud)
@@ -183,23 +184,24 @@ Two experiments, same 30 questions (all about classicmodels), `gpt-4o-mini`, tem
 
 | Metric | Small: full schema | Small: RAG | **Large: full schema** | **Large: RAG** |
 |---|---:|---:|---:|---:|
-| **Execution accuracy** | 96.7% | 96.7% | 93.3% | **96.7%** |
+| **Execution accuracy** | 96.7% | 96.7% | 90.0% | **96.7%** |
 | Easy (8) | 100% | 100% | 100% | 100% |
 | Joins (8) | 87.5% | 87.5% | 87.5% | 87.5% |
-| Aggregation (7) | 100% | 100% | 100% | 100% |
+| Aggregation (7) | 100% | 100% | 85.7% | **100%** |
 | Dates (7) | 100% | 100% | 85.7% | **100%** |
-| Avg prompt tokens | 1,904 | 1,814 | 9,200 | **1,973 (−79%)** |
-| Avg latency | 2.52 s | 2.94 s | 2.46 s | 2.96 s |
+| Avg prompt tokens | 1,904 | 1,814 | 9,203 | **1,973 (−79%)** |
+| Avg latency | 2.52 s | 2.94 s | 2.31 s | 2.70 s |
 | Avg tables sent | 8 | 7.1 | 65 | **8.6** |
 | Needed tables included in prompt | 100% | 100% | 100% | 100% |
 | Queries fixed by self-correction | 1 | 0 | 0 | 0 |
 
 **What the numbers say**
 
-- **RAG scales.** As the schema grew from 8 to 65 tables, full-schema prompts grew about 5× (1,904 → 9,200 tokens), while RAG prompts stayed almost flat (1,814 → 1,973) because it still sends only about 9 tables. On a large schema that is a **79% token (cost) saving**, with the needed tables retrieved 100% of the time.
-- **Fewer distractions, better accuracy.** With 65 tables, full-schema mode answered *"total payment amount received in each year"* from `city_hospital.invoices` instead of `classicmodels.payments`. RAG never saw the hospital tables and got it right.
+- **RAG scales.** As the schema grew from 8 to 65 tables, full-schema prompts grew about 5× (1,904 → 9,203 tokens), while RAG prompts stayed almost flat (1,814 → 1,973) because it still sends only about 9 tables. On a large schema that is a **79% token (cost) saving**, with the needed tables retrieved 100% of the time.
+- **Fewer distractions, better accuracy.** With 65 tables, full-schema mode answered *"total payment amount received in each year"* from `city_hospital.invoices` instead of `classicmodels.payments`, and joined the wrong table for *"average credit limit per country"*. RAG never saw the hospital tables and got both right.
+- **Run-to-run variation.** Even at temperature 0 the model's output varies slightly. Across two 65-table runs, full schema scored 93.3% and 90.0%, while RAG scored 96.7% both times. The table shows the latest run.
 - **The one miss in every run:** *"For each sales rep, show … the number of customers they manage."* The model listed all 23 employees (including the President with 0 customers) instead of only sales reps.
-- **Latency.** RAG adds about 0.5 s for the embedding call. On larger schemas the smaller prompt offsets this, and the token saving matters more for cost.
+- **Latency.** RAG adds about 0.4 s for the embedding call; the token saving matters more for cost.
 - **Small schemas.** With only 8 highly connected tables, RAG matches full-schema accuracy and saves just 5%, because top-5 + foreign-key neighbours already covers most tables.
 
 Per-question details for the latest (65-table) run are in [`eval_results.json`](eval_results.json).

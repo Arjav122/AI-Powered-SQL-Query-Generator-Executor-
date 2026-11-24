@@ -15,6 +15,7 @@ app = FastAPI(title="AI SQL Query API", version="3.0.0")
 class GenerateSQLRequest(BaseModel):
     natural_language_query: str = Field(..., min_length=3)
     use_rag: bool = True
+    database: str | None = None  # limit to one database (None = all)
 
 
 class ExecuteSQLRequest(BaseModel):
@@ -61,7 +62,8 @@ def generate_sql(request: GenerateSQLRequest):
     engine = db.get_engine(cfg)
     _call(rag.ensure_index, engine, cfg, status=500)  # no-op if the schema hash is unchanged
     _call(rag.seed_examples, db.connection_key(cfg), status=500)
-    result = _call(llm.generate_sql, engine, cfg, request.natural_language_query, request.use_rag)
+    result = _call(llm.generate_sql, engine, cfg, request.natural_language_query, request.use_rag,
+                   5, None, request.database)
     if result["error"]:
         raise HTTPException(status_code=400, detail=result)
     return {"sql_query": result["sql"], **result}

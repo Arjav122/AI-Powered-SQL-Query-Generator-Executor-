@@ -34,20 +34,21 @@ def get_model() -> str:
 
 
 def build_context(cfg: dict, question: str, use_rag: bool = True, k: int = 5,
-                  examples_key: str | None = None) -> dict:
+                  examples_key: str | None = None, database: str | None = None) -> dict:
     """Pick the schema (and few-shot examples) to put in the prompt.
 
     RAG on : top-k similar tables + FK-linked tables, and the 3 most similar examples.
     RAG off: every indexed table, no examples (the baseline we compare against).
-    `examples_key` lets eval.py use its own clean examples collection.
+    `database` limits both modes to one database (None = all). `examples_key` lets eval.py
+    use its own clean examples collection.
     """
     conn_key = db.connection_key(cfg)
     if not use_rag:
-        return {"tables": rag.all_tables(conn_key), "examples": []}
+        return {"tables": rag.all_tables(conn_key, database), "examples": []}
     question_embedding = rag.embed([question])[0]  # embed once, reuse for both lookups
     return {
-        "tables": rag.retrieve_tables(conn_key, question_embedding, k),
-        "examples": rag.retrieve_examples(examples_key or conn_key, question_embedding, 3),
+        "tables": rag.retrieve_tables(conn_key, question_embedding, k, database),
+        "examples": rag.retrieve_examples(examples_key or conn_key, question_embedding, 3, database),
     }
 
 
@@ -78,13 +79,13 @@ def _check(engine, sql: str) -> str:
 
 
 def generate_sql(engine, cfg: dict, question: str, use_rag: bool = True, k: int = 5,
-                 examples_key: str | None = None) -> dict:
+                 examples_key: str | None = None, database: str | None = None) -> dict:
     """Generate SQL, then self-correct up to MAX_ATTEMPTS times using EXPLAIN errors.
 
     Returns {"sql", "explanation", "tables_used", "retrieved", "examples", "attempts", "prompt_tokens", "error"}.
     "error" is None on success. "attempts" lists every try as {"sql", "error"}.
     """
-    context = build_context(cfg, question, use_rag, k, examples_key)
+    context = build_context(cfg, question, use_rag, k, examples_key, database)
     if not context["tables"]:
         raise ValueError("The schema is not indexed yet. Click 'Re-index schema' in the sidebar.")
     schema_text = "\n\n".join(t["document"] for t in context["tables"])

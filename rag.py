@@ -12,6 +12,7 @@ import db
 CHROMA_PATH = "./chroma_data"
 EMBEDDING_MODEL = "text-embedding-3-small"
 FEW_SHOT_FILE = Path(__file__).with_name("few_shot.json")
+INDEX_VERSION = "v2"  # v2: each table stores its database name (for the sidebar Database filter)
 _disk_client = None
 _memory_client = None
 
@@ -66,7 +67,7 @@ def ensure_index(engine, cfg: dict, force: bool = False) -> dict:
     """Index the schema into Chroma. Skips work if the schema hash hasn't changed (unless force=True)."""
     conn_key = db.connection_key(cfg)
     schema = db.read_schema(engine, db.user_databases(engine, cfg))
-    new_hash = db.schema_hash(schema)
+    new_hash = f"{INDEX_VERSION}:{db.schema_hash(schema)}"  # version bump forces a rebuild after format changes
     collection = _schema_collection(conn_key)
 
     if not force and collection.count() > 0 and (collection.metadata or {}).get("schema_hash") == new_hash:
@@ -83,28 +84,38 @@ def ensure_index(engine, cfg: dict, force: bool = False) -> dict:
         ids=[t["name"] for t in schema],
         documents=documents,
         embeddings=embed(documents),
-        metadatas=[{"fk_targets": ",".join(fk["ref_table"] for fk in t["foreign_keys"])} for t in schema],
+        metadatas=[{"database": t["database"], "fk_targets": ",".join(fk["ref_table"] for fk in t["foreign_keys"])}
+                   for t in schema],
     )
     return {"status": "re-indexed", "tables": len(schema)}
 
 
-def all_tables(conn_key: str) -> list[dict]:
-    """Every indexed table (used for full-schema mode)."""
-    data = _schema_collection(conn_key).get(include=["documents"])
+def _where(database: str | None) -> dict | None:
+    """Chroma filter that limits a lookup to one database (None = all databases)."""
+    return {"database": database} if database else None
+
+
+def all_tables(conn_key: str, database: str | None = None) -> list[dict]:
+    """Every indexed table, optionally only one database (used for full-schema mode)."""
+    data = _schema_collection(conn_key).get(where=_where(database), include=["documents"])
     return [{"name": i, "document": d, "via": "full schema"} for i, d in zip(data["ids"], data["documents"])]
 
 
-def retrieve_tables(conn_key: str, query_embedding: list[float], k: int = 5) -> list[dict]:
-    """Top-k tables by similarity, plus tables linked by a foreign key (1 hop, both directions)."""
+def retrieve_tables(conn_key: str, query_embedding: list[float], k: int = 5,
+                    database: str | None = None) -> list[dict]:
+    """Top-k tables by similarity, plus tables linked by a foreign key (1 hop, both directions).
+
+    `database` limits the search to one database, so similar tables elsewhere can't be picked.
+    """
     collection = _schema_collection(conn_key)
-    if collection.count() == 0:
+    everything = collection.get(where=_where(database), include=["documents", "metadatas"])
+    if not everything["ids"]:
         return []
-    hits = collection.query(query_embeddings=[query_embedding], n_results=min(k, collection.count()),
-                            include=["documents", "metadatas"])
+    hits = collection.query(query_embeddings=[query_embedding], n_results=min(k, len(everything["ids"])),
+                            where=_where(database), include=["documents", "metadatas"])
     found = {name: {"name": name, "document": doc, "via": "similarity"}
              for name, doc in zip(hits["ids"][0], hits["documents"][0])}
 
-    everything = collection.get(include=["documents", "metadatas"])
     linked = set()
     for name, meta in zip(everything["ids"], everything["metadatas"]):
         targets = set(filter(None, (meta or {}).get("fk_targets", "").split(",")))
@@ -165,10 +176,16 @@ def add_example(conn_key: str, question: str, sql: str) -> None:
         embeddings=embed([question]), metadatas=[{"sql": sql}])
 
 
-def retrieve_examples(conn_key: str, query_embedding: list[float], n: int = 3) -> list[dict]:
+def retrieve_examples(conn_key: str, query_embedding: list[float], n: int = 3,
+                      database: str | None = None) -> list[dict]:
+    """The n most similar examples. With `database`, only examples whose SQL uses that database."""
     collection = _examples_collection(conn_key)
     if collection.count() == 0:
         return []
-    hits = collection.query(query_embeddings=[query_embedding], n_results=min(n, collection.count()),
+    # Fetch extra candidates, then keep the ones for the chosen database (SQL uses database.table names).
+    hits = collection.query(query_embeddings=[query_embedding], n_results=min(n * 5, collection.count()),
                             include=["documents", "metadatas"])
-    return [{"question": q, "sql": m["sql"]} for q, m in zip(hits["documents"][0], hits["metadatas"][0])]
+    examples = [{"question": q, "sql": m["sql"]} for q, m in zip(hits["documents"][0], hits["metadatas"][0])]
+    if database:
+        examples = [e for e in examples if f"{database.lower()}." in e["sql"].lower()]
+    return examples[:n]

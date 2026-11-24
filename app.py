@@ -162,6 +162,16 @@ with st.sidebar:
                 st.stop()
         st.success(f"Connected · {ss.indexed[conn_key]['tables']} tables indexed")
 
+        try:
+            db_options = db.user_databases(engine, cfg)
+        except Exception:
+            db_options = []
+        if len(db_options) > 1:
+            db_options = ["All databases"] + db_options
+        db_choice = st.selectbox("Database", db_options or ["All databases"],
+                                 help="Ask about one database only, so similar tables in other databases can't be picked.")
+        selected_db = None if db_choice == "All databases" else db_choice
+
         use_rag = st.toggle("Use RAG (relevant tables + examples)", value=True,
                             help="Off = send the full schema with no examples (baseline).")
         if st.button("Re-index schema", width="stretch"):
@@ -199,7 +209,7 @@ with ask_tab:
         else:
             try:
                 with st.spinner("Retrieving schema and generating SQL..."):
-                    gen = llm.generate_sql(engine, cfg, question, use_rag=use_rag)
+                    gen = llm.generate_sql(engine, cfg, question, use_rag=use_rag, database=selected_db)
             except Exception as exc:
                 gen = {"error": str(exc), "sql": "", "attempts": [], "retrieved": [], "explanation": ""}
             ss.generation, ss.result = gen, None
@@ -288,7 +298,8 @@ with schema_tab:
     try:
         databases = db.user_databases(engine, cfg)
         db_col, table_col = st.columns(2)
-        chosen_db = db_col.selectbox("Database", databases)
+        start = databases.index(selected_db) if selected_db in databases else 0
+        chosen_db = db_col.selectbox("Database", databases, index=start, key=f"schema_db_{selected_db}")
         tables = cached_tables(engine, conn_key, chosen_db) if chosen_db else []
         chosen_table = table_col.selectbox("Table", tables)
         if chosen_table:
